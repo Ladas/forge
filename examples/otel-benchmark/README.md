@@ -1,15 +1,15 @@
 # OTel Observability Benchmark
 
 Deploys a full observability stack on KIND for benchmarking Praxis proxy
-OTel tracing overhead.
+OTel tracing overhead across two scenarios: core proxy and AI proxy.
 
 ## Stack
 
-- **Prometheus + Grafana** (kube-prometheus-stack) — metrics + visualization
+- **Prometheus + Grafana 11.x** — metrics + visualization
 - **Tempo** — distributed trace storage
 - **Loki + Promtail** — log aggregation
-- **OTel Collector** — trace pipeline (OTLP → Tempo + MLflow)
-- **MLflow** — experiment tracking
+- **OTel Collector** — trace pipeline (OTLP -> Tempo)
+- **MLflow** — experiment tracking UI
 - **Fortio echo** — mock HTTP backend
 - **llm-d inference-sim** — mock LLM backend
 - **Praxis proxy** — the proxy under test (baseline + OTel variants)
@@ -20,7 +20,7 @@ OTel tracing overhead.
 - [KIND](https://kind.sigs.k8s.io/)
 - [Helm](https://helm.sh/) with repos: `prometheus-community`, `grafana`, `community-charts`
 - [vegeta](https://github.com/tsenart/vegeta) (for benchmarks)
-- Praxis source checkout with OTel PRs (for image builds)
+- Praxis source checkouts (for image builds)
 
 ## Quick Start
 
@@ -31,43 +31,44 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add community-charts https://community-charts.github.io/helm-charts
 helm repo update
 
-# 2. Set the path to your praxis repo checkout
-export PRAXIS_DIR=/path/to/praxis
+# 2. Set paths to source checkouts
+export PRAXIS_DIR=/path/to/praxis    # praxis core repo (with OTel PRs)
+export AI_DIR=/path/to/ai            # praxis AI repo
 
-# 3. Build praxis images (if not already built)
+# 3. Build images
+# Core: baseline + OTel
 cd "$PRAXIS_DIR"
 docker build -t praxis:dev -f Containerfile .
 sed 's|cargo build --release -p praxis-proxy|cargo build --release -p praxis-proxy --features otel|g' \
   Containerfile | docker build -t praxis:dev-otel -f - .
 
+# AI: baseline (from upstream/main, no patches)
+cd "$AI_DIR"
+docker build -t praxis-ai:dev -f Containerfile .
+
+# AI: OTel (from otel-fixes branch with praxis core patches)
+# See "Building praxis-ai:dev-otel" section below.
+
 # 4. Deploy the full stack
 cd /path/to/forge
 cargo run -- up --config examples/otel-benchmark.yaml
 
-# If forge up doesn't apply stacks automatically, apply them manually:
+# If forge up doesn't apply stacks automatically:
 for stack in prometheus tempo loki otel-collector mlflow mock-backends praxis-images praxis-deploy dashboards datasources; do
   cargo run -- stack apply --config examples/otel-benchmark.yaml local "$stack"
 done
 
-# 5. Switch to OTel image (if deployed with baseline)
-kubectl --context kind-otel-bench-local set image deployment/praxis-proxy praxis-proxy=praxis:dev-otel
-
-# 6. Verify
-curl http://localhost:18080/         # Praxis proxy
-open http://localhost:13000          # Grafana (admin/admin)
-open http://localhost:19090          # Prometheus
-open http://localhost:15000          # MLflow
+# 5. Verify
+curl http://localhost:18080/
+open http://localhost:13000    # Grafana (admin/admin)
+open http://localhost:19090    # Prometheus
+open http://localhost:15000    # MLflow
 ```
 
-## Run Benchmark
+## Scenario 1: Core Praxis OTel Benchmark
 
-> **Note:** This benchmark uses the core `praxis` proxy, which generates
-> a root request span, per-filter child spans, and an upstream exchange
-> span (10 spans per request). To see AI-specific routing spans
-> (`routing.select` with provider/cluster/site attributes), build from
-> the `praxis-proxy/ai` repo with `--features opentelemetry` and use
-> AI filters (intelligent_route, format classification) with
-> inference-sim as the backend. That is a separate demo configuration.
+Measures OTel tracing overhead on the core proxy with echo backend.
+Generates 10 spans per request (root + 8 per-filter + upstream_exchange).
 
 ```bash
 bash examples/otel-benchmark/scripts/benchmark.sh
@@ -76,11 +77,76 @@ bash examples/otel-benchmark/scripts/benchmark.sh
 Runs 3 configurations at 2000 RPS for 30s each:
 - **A: Baseline** — `praxis:dev` (no OTel feature)
 - **B: OTel noop** — `praxis:dev-otel` (spans created, not exported)
-- **C: OTel full** — `praxis:dev-otel` (spans exported to collector → Tempo)
+- **C: OTel full** — `praxis:dev-otel` (spans exported to collector -> Tempo)
 
-Generate the markdown report:
+Generate the report:
 ```bash
 bash examples/otel-benchmark/scripts/report.sh <results-dir>
+```
+
+## Scenario 2: AI Praxis with Inference Sim
+
+Measures OTel overhead on the AI proxy with mock LLM backend.
+Generates 11 spans per request (core spans + response_body phase).
+Sends `POST /v1/chat/completions` to inference-sim.
+
+```bash
+bash examples/otel-benchmark/scripts/benchmark-ai.sh
+```
+
+Runs 3 configurations at 500 RPS for 30s each:
+- **A: AI Baseline** — `praxis-ai:dev` (no OTel feature)
+- **B: AI OTel noop** — `praxis-ai:dev-otel` (spans created, not exported)
+- **C: AI OTel full** — `praxis-ai:dev-otel` (spans exported to collector -> Tempo)
+
+Generate the report:
+```bash
+bash examples/otel-benchmark/scripts/report-ai.sh <results-dir>
+```
+
+### Span tree (AI request)
+
+```
+POST /v1/chat/completions -> inference-sim  (root)
+  |-- filter:request_id:request
+  |-- filter:access_log:request
+  |-- filter:router:request          -> routes /v1/* to inference cluster
+  |-- filter:load_balancer:request
+  |-- filter:load_balancer:response
+  |-- filter:router:response
+  |-- filter:access_log:response
+  |-- filter:request_id:response
+  |-- filter:access_log:response_body
+  +-- upstream_exchange [inference-sim:8000]
+```
+
+## Building praxis-ai:dev-otel
+
+The AI OTel image requires patched praxis core (for OTel spans) and the
+AI OTel fixes. Build with both repos side by side:
+
+```bash
+BUILD_DIR=$(mktemp -d)
+rsync -a --exclude='.git' --exclude='target' "$AI_DIR/" "$BUILD_DIR/ai/"
+for crate in core filter protocol tls server; do
+    rsync -a --exclude='target' "$PRAXIS_DIR/$crate/" "$BUILD_DIR/praxis/$crate/"
+done
+cp "$PRAXIS_DIR/Cargo.toml" "$PRAXIS_DIR/Cargo.lock" "$BUILD_DIR/praxis/"
+
+# Add patch.crates-io to ai/Cargo.toml pointing to ../praxis/*
+cat >> "$BUILD_DIR/ai/Cargo.toml" << 'PATCH'
+
+[patch.crates-io]
+praxis-proxy-core = { path = "../praxis/core" }
+praxis-proxy-filter = { path = "../praxis/filter" }
+praxis-proxy-protocol = { path = "../praxis/protocol" }
+praxis-proxy-tls = { path = "../praxis/tls" }
+praxis-proxy = { path = "../praxis/server" }
+PATCH
+
+# Build with OTel features enabled
+# (requires custom Containerfile that copies both repos)
+docker build -t praxis-ai:dev-otel -f Containerfile "$BUILD_DIR"
 ```
 
 ## Dashboards
@@ -97,7 +163,7 @@ bash examples/otel-benchmark/scripts/report.sh <results-dir>
 
 | View | URL |
 |------|-----|
-| Tempo trace search | http://localhost:13000/explore (select Tempo datasource → Search tab) |
+| Tempo trace search | http://localhost:13000/explore (select Tempo datasource) |
 | Prometheus metrics | http://localhost:13000/explore (select Prometheus datasource) |
 | Loki log search | http://localhost:13000/explore (select Loki datasource) |
 
@@ -124,7 +190,8 @@ bash examples/otel-benchmark/scripts/report.sh <results-dir>
 
 - **Grafana version**: Must use 11.x (pinned via `grafana.image.tag`). Grafana 12.0 has rendering bugs with provisioned dashboards using `row`/`gauge` panel types.
 - **Datasources**: Prometheus and Tempo datasources are added via the `datasources` stack. If Grafana restarts, they need re-adding.
-- **Tokio runtime fix**: The praxis `otel` feature requires a persistent Tokio runtime in `core/src/logging.rs` for the `BatchSpanProcessor` to drive tonic's async gRPC export. This fix is not yet in any upstream PR.
+- **Tokio runtime fix**: The praxis `otel` feature requires a persistent Tokio runtime in `core/src/logging.rs` for the `BatchSpanProcessor` to drive tonic's async gRPC export.
+- **MLflow trace ingestion**: The OTel collector v0.108 sends protobuf to MLflow, but MLflow 3.x only accepts JSON OTLP. Traces go to Tempo (primary store). MLflow shows the experiment tracking UI.
 
 ## Teardown
 

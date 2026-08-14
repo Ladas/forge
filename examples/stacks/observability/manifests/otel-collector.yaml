@@ -25,20 +25,12 @@ data:
         endpoint: tempo.monitoring.svc:4317
         tls:
           insecure: true
-      otlphttp/mlflow:
-        endpoint: http://mlflow.mlflow.svc:5000
-        tls:
-          insecure: true
-        headers:
-          x-mlflow-experiment-id: "0"
-          Host: "localhost:5000"
-
     service:
       pipelines:
         traces:
           receivers: [otlp]
           processors: [batch]
-          exporters: [debug, otlp/tempo, otlphttp/mlflow]
+          exporters: [debug, otlp/tempo]
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -1,8 +1,8 @@
 # Praxis Deployment for benchmark mode.
 # ConfigMap is NOT included here — setup.sh creates it separately
 # to avoid overwriting with empty data.
-# No args are specified — the Containerfile ENTRYPOINT already
-# includes [-c, /etc/praxis/config.yaml].
+# The core praxis Containerfile includes [-c, /etc/praxis/config.yaml]
+# in ENTRYPOINT but the AI Containerfile does not — args are set below.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

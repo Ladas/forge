@@ -1,0 +1,35 @@
+admin:
+  address: "0.0.0.0:9901"
+
+insecure_options:
+  allow_public_admin: true
+
+telemetry:
+  otlp_endpoint: "http://otel-collector.otel.svc:4317"
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+      - filter: router
+        routes:
+          - path_prefix: "/v1/"
+            cluster: inference
+          - path_prefix: "/"
+            cluster: echo
+
+      - filter: load_balancer
+        clusters:
+          - name: echo
+            endpoints:
+              - "echo-backend.default.svc:8080"
+          - name: inference
+            endpoints:
+              - "inference-sim.default.svc:8000"

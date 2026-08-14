@@ -120,8 +120,13 @@ spec:
           chart: community-charts/mlflow
           version: "{{ cluster.properties.mlflowVersion }}"
           namespace: mlflow
+          values:
+            backendStore:
+              databaseMigration: true
+            service:
+              type: NodePort
         - type: exec
-          command: [bash, -c, "kubectl -n mlflow patch svc mlflow --type=merge -p '{\"spec\":{\"type\":\"NodePort\"}}' && kubectl -n mlflow patch svc mlflow --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/ports/0/nodePort\",\"value\":30500}]'"]
+          command: [bash, -c, "kubectl -n mlflow patch svc mlflow --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/ports/0/nodePort\",\"value\":30500}]'"]
 
     mock-backends:
       description: Fortio echo + llm-d inference-sim
