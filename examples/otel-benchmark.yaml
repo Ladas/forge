@@ -1,0 +1,175 @@
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: otel-benchmark
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: otel-bench
+  network:
+    crossCluster: false
+
+  clusters:
+    - name: local
+      ports:
+        - host: 18080
+          container: 30080    # Praxis proxy
+        - host: 18901
+          container: 30901    # Praxis admin/metrics
+        - host: 13000
+          container: 30300    # Grafana
+        - host: 19090
+          container: 30909    # Prometheus
+        - host: 15000
+          container: 30500    # MLflow
+      stacks:
+        - prometheus
+        - tempo
+        - loki
+        - otel-collector
+        - mlflow
+        - mock-backends
+        - praxis-images
+        - praxis-deploy
+        - dashboards
+        - datasources
+      properties:
+        # Pin chart versions for reproducibility
+        kubePrometheusVersion: "72.6.3"
+        tempoVersion: "1.24.4"
+        lokiStackVersion: "2.10.2"
+        mlflowVersion: "1.11.3"
+
+  stacks:
+    prometheus:
+      description: kube-prometheus-stack (Prometheus + Grafana)
+      steps:
+        - type: helm
+          release: monitoring
+          chart: prometheus-community/kube-prometheus-stack
+          version: "{{ cluster.properties.kubePrometheusVersion }}"
+          namespace: monitoring
+          values:
+            prometheus:
+              prometheusSpec:
+                serviceMonitorSelectorNilUsesHelmValues: false
+                additionalScrapeConfigs:
+                  - job_name: praxis-proxy
+                    metrics_path: /metrics
+                    scrape_interval: 15s
+                    static_configs:
+                      - targets: ["praxis-proxy.default.svc:9901"]
+              service:
+                type: NodePort
+                nodePort: 30909
+            grafana:
+              adminPassword: admin
+              image:
+                tag: 11.6.0
+              service:
+                type: NodePort
+                nodePort: 30300
+        - type: wait
+          resource: deployment/monitoring-grafana
+          namespace: monitoring
+          condition: available
+          timeout: "300s"
+
+    tempo:
+      description: Tempo trace storage
+      steps:
+        - type: helm
+          release: tempo
+          chart: grafana/tempo
+          version: "{{ cluster.properties.tempoVersion }}"
+          namespace: monitoring
+
+    loki:
+      description: Loki + Promtail log aggregation
+      steps:
+        - type: helm
+          release: loki
+          chart: grafana/loki-stack
+          version: "{{ cluster.properties.lokiStackVersion }}"
+          namespace: monitoring
+          values:
+            loki:
+              persistence:
+                enabled: false
+            promtail:
+              enabled: true
+
+    otel-collector:
+      description: OpenTelemetry Collector (OTLP → Tempo + MLflow)
+      steps:
+        - type: exec
+          command: [bash, -c, "kubectl create namespace otel --dry-run=client -o yaml | kubectl apply -f -"]
+        - type: manifest
+          path: stacks/observability/manifests/otel-collector.yaml
+        - type: wait
+          resource: deployment/otel-collector
+          namespace: otel
+          condition: available
+          timeout: "60s"
+
+    mlflow:
+      description: MLflow experiment tracking
+      steps:
+        - type: helm
+          release: mlflow
+          chart: community-charts/mlflow
+          version: "{{ cluster.properties.mlflowVersion }}"
+          namespace: mlflow
+        - type: exec
+          command: [bash, -c, "kubectl -n mlflow patch svc mlflow --type=merge -p '{\"spec\":{\"type\":\"NodePort\"}}' && kubectl -n mlflow patch svc mlflow --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/ports/0/nodePort\",\"value\":30500}]'"]
+
+    mock-backends:
+      description: Fortio echo + llm-d inference-sim
+      steps:
+        - type: manifest
+          path: stacks/mock-backends/manifests/echo-backend.yaml
+        - type: manifest
+          path: stacks/mock-backends/manifests/inference-sim.yaml
+
+    praxis-images:
+      description: Build and load Praxis images into KIND
+      steps:
+        - type: exec
+          command: [bash, -c, "cd \"${PRAXIS_DIR:?Set PRAXIS_DIR to your praxis checkout}\" && docker build -t praxis:dev -f Containerfile ."]
+        - type: exec
+          command: [bash, -c, "cd \"${PRAXIS_DIR:?}\" && sed 's|cargo build --release -p praxis-proxy|cargo build --release -p praxis-proxy --features otel|g' Containerfile | docker build -t praxis:dev-otel -f - ."]
+        - type: exec
+          command: [bash, -c, "kind load docker-image praxis:dev --name otel-bench-local"]
+        - type: exec
+          command: [bash, -c, "kind load docker-image praxis:dev-otel --name otel-bench-local"]
+
+    praxis-deploy:
+      description: Deploy Praxis proxy with OTel config
+      steps:
+        - type: exec
+          command: [bash, -c, "kubectl create configmap praxis-config --from-file=config.yaml=examples/otel-benchmark/configs/otel-full.yaml -n default --dry-run=client -o yaml | kubectl apply -f -"]
+        - type: manifest
+          path: otel-benchmark/manifests/praxis.yaml
+        - type: manifest
+          path: otel-benchmark/manifests/servicemonitor.yaml
+        - type: wait
+          resource: deployment/praxis-proxy
+          namespace: default
+          condition: available
+          timeout: "120s"
+
+    dashboards:
+      description: Load Grafana dashboards via ConfigMap
+      steps:
+        - type: exec
+          command: [bash, -c, "kubectl -n monitoring create configmap praxis-dashboards --from-file=examples/stacks/observability/dashboards/ --dry-run=client -o yaml | kubectl apply -f -"]
+        - type: exec
+          command: [kubectl, -n, monitoring, label, configmap, praxis-dashboards, grafana_dashboard=1, --overwrite]
+
+    datasources:
+      description: Add Tempo + Loki datasources to Grafana
+      steps:
+        - type: exec
+          command: [bash, -c, "sleep 5 && curl -sf -u admin:admin -X POST http://localhost:13000/api/datasources -H 'Content-Type: application/json' -d '{\"name\":\"Tempo\",\"type\":\"tempo\",\"access\":\"proxy\",\"url\":\"http://tempo.monitoring.svc:3200\",\"uid\":\"tempo\"}' || true"]
+        - type: exec
+          command: [bash, -c, "curl -sf -u admin:admin -X POST http://localhost:13000/api/datasources -H 'Content-Type: application/json' -d '{\"name\":\"Loki\",\"type\":\"loki\",\"access\":\"proxy\",\"url\":\"http://loki.monitoring.svc:3100\",\"uid\":\"loki\"}' || true"]

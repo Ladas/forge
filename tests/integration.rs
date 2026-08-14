@@ -316,19 +316,22 @@ fn cli_accepts_stack_status() {
 
 #[test]
 fn config_with_port_mappings_parses_and_validates() {
-    let yaml = std::fs::read_to_string("tests/fixtures/port-mappings.yaml").unwrap_or_else(|e| {
-        eprintln!("cannot read fixture: {e}");
+    let Ok(yaml) = std::fs::read_to_string("tests/fixtures/port-mappings.yaml") else {
         std::process::abort()
-    });
-    let cfg: config::ForgeConfig = serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
-        eprintln!("cannot parse: {e}");
+    };
+    let Ok(cfg) = serde_yaml::from_str::<config::ForgeConfig>(&yaml) else {
         std::process::abort()
-    });
-    validate::validate(&cfg).unwrap_or_else(|e| {
-        eprintln!("validation failed: {e}");
+    };
+    if validate::validate(&cfg).is_err() {
         std::process::abort()
-    });
-    assert_eq!(cfg.spec.clusters[0].ports.len(), 2);
-    assert_eq!(cfg.spec.clusters[0].ports[0].host, 8080);
-    assert_eq!(cfg.spec.clusters[0].ports[0].container, 30080);
+    }
+    let Some(cluster) = cfg.spec.clusters.first() else {
+        std::process::abort()
+    };
+    assert_eq!(cluster.ports.len(), 2);
+    let Some(port) = cluster.ports.first() else {
+        std::process::abort()
+    };
+    assert_eq!(port.host, 8080);
+    assert_eq!(port.container, 30080);
 }
