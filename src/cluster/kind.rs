@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     command::runner::{CommandOutput, CommandRunner, CommandSpec},
-    config::NodeConfig,
+    config::{NodeConfig, PortMapping},
     error::ForgeError,
 };
 
@@ -30,6 +30,18 @@ pub fn kubectl_context(kind_name: &str) -> String {
 // Lifecycle
 // ---------------------------------------------------------------
 
+/// Configuration for creating a KIND cluster.
+pub struct CreateClusterConfig<'a> {
+    /// Node layout for the cluster.
+    pub nodes: &'a NodeConfig,
+    /// Port mappings to add to the first control-plane node.
+    pub ports: &'a [PortMapping],
+    /// Directory where config files are written.
+    pub config_dir: &'a std::path::Path,
+    /// Optional Docker network to join via `KIND_EXPERIMENTAL_DOCKER_NETWORK`.
+    pub docker_network: Option<&'a str>,
+}
+
 /// Check whether a KIND cluster with the given name exists.
 ///
 /// # Errors
@@ -40,10 +52,7 @@ pub fn cluster_exists(runner: &dyn CommandRunner, kind_name: &str) -> Result<boo
     Ok(clusters.iter().any(|c| c == kind_name))
 }
 
-/// Create a KIND cluster with a generated config.
-///
-/// When `docker_network` is `Some`, the cluster nodes join that
-/// Docker network via `KIND_EXPERIMENTAL_DOCKER_NETWORK`.
+/// Create a Kind cluster with the given configuration.
 ///
 /// # Errors
 ///
@@ -51,13 +60,11 @@ pub fn cluster_exists(runner: &dyn CommandRunner, kind_name: &str) -> Result<boo
 pub fn create_cluster(
     runner: &dyn CommandRunner,
     kind_name: &str,
-    nodes: &NodeConfig,
-    config_dir: &std::path::Path,
-    docker_network: Option<&str>,
+    config: &CreateClusterConfig<'_>,
 ) -> Result<(), ForgeError> {
-    let config_yaml = generate_kind_config(nodes);
-    let config_path = write_kind_config(config_dir, kind_name, &config_yaml)?;
-    let result = run_create(runner, kind_name, &config_path, docker_network);
+    let config_yaml = generate_kind_config(config.nodes, config.ports);
+    let config_path = write_kind_config(config.config_dir, kind_name, &config_yaml)?;
+    let result = run_create(runner, kind_name, &config_path, config.docker_network);
     cleanup_kind_config(&config_path);
     result
 }
@@ -130,11 +137,31 @@ pub fn run_kubectl(
 // KIND config generation
 // ---------------------------------------------------------------
 
-/// Generate a KIND cluster config YAML from a [`NodeConfig`].
-pub fn generate_kind_config(nodes: &NodeConfig) -> String {
+/// Generate a Kind cluster config YAML string.
+///
+/// When `ports` is non-empty, `extraPortMappings` entries are added
+/// to the first control-plane node (Kind only supports port mappings
+/// on control-plane nodes).
+pub fn generate_kind_config(nodes: &NodeConfig, ports: &[PortMapping]) -> String {
+    use std::fmt::Write as _;
     let mut yaml = String::from("kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n");
-    for _ in 0..nodes.control_planes {
+    for i in 0..nodes.control_planes {
         yaml.push_str("  - role: control-plane\n");
+        if i == 0 && !ports.is_empty() {
+            yaml.push_str("    extraPortMappings:\n");
+            for pm in ports {
+                let _written = write!(
+                    &mut yaml,
+                    "      - hostPort: {}\n        containerPort: {}\n        protocol: {}\n",
+                    pm.host,
+                    pm.container,
+                    pm.protocol.to_uppercase(),
+                );
+                if let Some(addr) = &pm.bind_address {
+                    let _written = writeln!(&mut yaml, "        listenAddress: \"{addr}\"");
+                }
+            }
+        }
     }
     for _ in 0..nodes.workers {
         yaml.push_str("  - role: worker\n");
@@ -316,7 +343,7 @@ mod tests {
     #[test]
     fn generate_kind_config_default_nodes() {
         let nodes = NodeConfig::default();
-        let yaml = generate_kind_config(&nodes);
+        let yaml = generate_kind_config(&nodes, &[]);
         assert!(yaml.contains("control-plane"), "should have control-plane");
         let cp_count = yaml.matches("control-plane").count();
         assert_eq!(
@@ -332,7 +359,7 @@ mod tests {
             control_planes: 3,
             workers: 2,
         };
-        let yaml = generate_kind_config(&nodes);
+        let yaml = generate_kind_config(&nodes, &[]);
         let cp_count = yaml.matches("control-plane").count();
         let w_count = yaml.matches("worker").count();
         assert_eq!(cp_count, 3, "should have 3 control-planes, got {cp_count}");
@@ -438,5 +465,60 @@ mod tests {
             }
         });
         assert!(!exists, "forge-missing should not exist");
+    }
+
+    #[test]
+    fn generate_kind_config_with_port_mappings() {
+        let nodes = NodeConfig::default();
+        let ports = vec![
+            PortMapping {
+                bind_address: None,
+                host: 13000,
+                container: 30300,
+                protocol: "tcp".to_owned(),
+            },
+            PortMapping {
+                bind_address: None,
+                host: 19090,
+                container: 30909,
+                protocol: "tcp".to_owned(),
+            },
+        ];
+        let yaml = generate_kind_config(&nodes, &ports);
+        assert!(
+            yaml.contains("extraPortMappings:"),
+            "should have extraPortMappings"
+        );
+        assert!(yaml.contains("hostPort: 13000"), "should map Grafana port");
+        assert!(
+            yaml.contains("containerPort: 30300"),
+            "should map Grafana node port"
+        );
+        assert!(
+            yaml.contains("hostPort: 19090"),
+            "should map Prometheus port"
+        );
+        assert!(yaml.contains("protocol: TCP"), "should uppercase protocol");
+    }
+
+    #[test]
+    fn generate_kind_config_port_mappings_only_on_first_control_plane() {
+        let nodes = NodeConfig {
+            control_planes: 2,
+            workers: 0,
+        };
+        let ports = vec![PortMapping {
+            bind_address: None,
+            host: 8080,
+            container: 30080,
+            protocol: "tcp".to_owned(),
+        }];
+        let yaml = generate_kind_config(&nodes, &ports);
+        // extraPortMappings should appear exactly once
+        assert_eq!(
+            yaml.matches("extraPortMappings:").count(),
+            1,
+            "port mappings should only appear on the first control-plane node"
+        );
     }
 }

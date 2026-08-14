@@ -313,3 +313,22 @@ fn cli_accepts_stack_status() {
     let result = Cli::try_parse_from(["praxis-forge", "stack", "status"]);
     assert!(result.is_ok(), "stack status should parse: {result:?}");
 }
+
+#[test]
+fn config_with_port_mappings_parses_and_validates() {
+    let yaml = std::fs::read_to_string("tests/fixtures/port-mappings.yaml").unwrap_or_else(|e| {
+        eprintln!("cannot read fixture: {e}");
+        std::process::abort()
+    });
+    let cfg: config::ForgeConfig = serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
+        eprintln!("cannot parse: {e}");
+        std::process::abort()
+    });
+    validate::validate(&cfg).unwrap_or_else(|e| {
+        eprintln!("validation failed: {e}");
+        std::process::abort()
+    });
+    assert_eq!(cfg.spec.clusters[0].ports.len(), 2);
+    assert_eq!(cfg.spec.clusters[0].ports[0].host, 8080);
+    assert_eq!(cfg.spec.clusters[0].ports[0].container, 30080);
+}
