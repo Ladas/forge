@@ -51,12 +51,19 @@ docker build -t praxis-ai:dev -f Containerfile .
 
 # 4. Deploy the full stack
 cd /path/to/forge
-cargo run -- up --config examples/otel-benchmark.yaml
+praxis-forge doctor                                            # check tools
+praxis-forge plan --config examples/otel-benchmark.yaml        # preview
+praxis-forge up --config examples/otel-benchmark.yaml          # create cluster
 
-# If forge up doesn't apply stacks automatically:
-for stack in prometheus tempo loki otel-collector mlflow mock-backends praxis-images praxis-deploy dashboards datasources; do
-  cargo run -- stack apply --config examples/otel-benchmark.yaml local "$stack"
+# Load pre-built images into KIND
+kind load docker-image praxis:dev praxis:dev-otel --name otel-bench-local
+kind load docker-image praxis-ai:dev praxis-ai:dev-otel --name otel-bench-local
+
+# Apply stacks (skip praxis-images if images are already loaded)
+for stack in prometheus tempo loki otel-collector mlflow mock-backends praxis-deploy dashboards datasources; do
+  praxis-forge apply --config examples/otel-benchmark.yaml local "$stack"
 done
+praxis-forge status --config examples/otel-benchmark.yaml      # check status
 
 # 5. Verify
 curl http://localhost:18080/
@@ -196,7 +203,7 @@ docker build -t praxis-ai:dev-otel -f Containerfile "$BUILD_DIR"
 ## Teardown
 
 ```bash
-cargo run -- down --config examples/otel-benchmark.yaml
+praxis-forge down --config examples/otel-benchmark.yaml
 # or
 kind delete cluster --name otel-bench-local
 ```
