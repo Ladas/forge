@@ -18,6 +18,8 @@ filter_chains:
     filters:
       - filter: request_id
 
+      - filter: access_log
+
       - filter: router
         routes:
           - path_prefix: "/"

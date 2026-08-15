@@ -1,5 +1,7 @@
-# Baseline benchmark config (no OTel).
-# Routes all traffic to the Fortio echo backend.
+# AI OTel noop benchmark config.
+# OTel feature is compiled in but no OTLP endpoint is configured,
+# so spans are created but never exported.
+# Routes /v1/* to inference-sim, everything else to Fortio echo.
 
 admin:
   address: "0.0.0.0:9901"
@@ -16,11 +18,12 @@ filter_chains:
   - name: main
     filters:
       - filter: request_id
-
       - filter: access_log
 
       - filter: router
         routes:
+          - path_prefix: "/v1/"
+            cluster: inference
           - path_prefix: "/"
             cluster: echo
 
@@ -29,3 +32,6 @@ filter_chains:
           - name: echo
             endpoints:
               - "echo-backend.default.svc:8080"
+          - name: inference
+            endpoints:
+              - "inference-sim.default.svc:8000"

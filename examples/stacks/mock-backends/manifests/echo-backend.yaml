@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: fortio
-          image: fortio/fortio:latest
+          image: fortio/fortio:1.75.2
           args: ["server", "-echo-server-default-params", "delay=0"]
           ports:
             - containerPort: 8080

@@ -100,7 +100,7 @@ spec:
               enabled: true
 
     otel-collector:
-      description: OpenTelemetry Collector (OTLP → Tempo + MLflow)
+      description: OpenTelemetry Collector (OTLP → Tempo)
       steps:
         - type: exec
           command: [bash, -c, "kubectl create namespace otel --dry-run=client -o yaml | kubectl apply -f -"]

@@ -35,15 +35,13 @@ run_vegeta() {
   echo ""
 }
 
-AI_CONFIG="${KIND_DIR}/configs/ai-otel-full.yaml"
-
 # ---- Run A: AI Baseline (no OTel) ----
 echo "=========================================="
 echo "  Run A: AI Baseline (praxis-ai:dev, no OTel)"
 echo "=========================================="
 
 kubectl --context "${CTX}" create configmap praxis-config \
-  --from-file=config.yaml="${AI_CONFIG}" \
+  --from-file=config.yaml="${KIND_DIR}/configs/ai-baseline.yaml" \
   -n default --dry-run=client -o yaml | kubectl --context "${CTX}" apply -f -
 # praxis-ai:dev has ENTRYPOINT [praxis-ai] — needs -c arg
 kubectl --context "${CTX}" patch deployment praxis-proxy -n default --type=json \
@@ -72,7 +70,7 @@ echo "  Run B: AI OTel noop (praxis-ai:dev-otel, no endpoint)"
 echo "=========================================="
 
 kubectl --context "${CTX}" create configmap praxis-config \
-  --from-file=config.yaml="${AI_CONFIG}" \
+  --from-file=config.yaml="${KIND_DIR}/configs/ai-otel-noop.yaml" \
   -n default --dry-run=client -o yaml | kubectl --context "${CTX}" apply -f -
 # praxis-ai:dev-otel has ENTRYPOINT [praxis -c /etc/praxis/config.yaml] — clear args
 kubectl --context "${CTX}" patch deployment praxis-proxy -n default --type=json \
@@ -100,6 +98,9 @@ echo "=========================================="
 echo "  Run C: AI OTel full (praxis-ai:dev-otel, exporting)"
 echo "=========================================="
 
+kubectl --context "${CTX}" create configmap praxis-config \
+  --from-file=config.yaml="${KIND_DIR}/configs/ai-otel-full.yaml" \
+  -n default --dry-run=client -o yaml | kubectl --context "${CTX}" apply -f -
 kubectl --context "${CTX}" set env deployment/praxis-proxy \
   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.otel.svc:4317 -n default
 kubectl --context "${CTX}" scale deployment/praxis-proxy --replicas=0 -n default

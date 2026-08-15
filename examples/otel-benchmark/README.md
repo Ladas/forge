@@ -161,10 +161,10 @@ docker build -t praxis-ai:dev-otel -f Containerfile "$BUILD_DIR"
 | Dashboard | URL | What it shows |
 |-----------|-----|------|
 | Praxis Proxy Overview | http://localhost:13000/d/praxis-proxy-overview | Request rate, latency P50/P99, requests by method |
-| OTel Traces | http://localhost:13000/d/praxis-traces | Searchable trace table with clickable Trace IDs |
-| Benchmark Results | http://localhost:13000/d/praxis-benchmark | CPU/memory for praxis + collector, RPS, latency |
-| AI/LLM Golden Signals | http://localhost:13000/d/praxis-ai-golden-signals | P95 latency stat, throughput, AI token metrics (future) |
-| Structured Logs | http://localhost:13000/d/praxis-logs | Log volume, error logs, all praxis access logs |
+| Praxis OTel Traces | http://localhost:13000/d/praxis-traces | Searchable trace table with clickable Trace IDs |
+| Praxis Benchmark Results | http://localhost:13000/d/praxis-benchmark | CPU/memory for praxis + collector, RPS, latency |
+| Praxis AI/LLM Golden Signals | http://localhost:13000/d/praxis-ai-golden-signals | P95 latency stat, throughput, AI token metrics (future) |
+| Praxis Structured Logs | http://localhost:13000/d/praxis-logs | Log volume, error logs, all praxis access logs |
 
 ### Explore views
 
@@ -198,7 +198,7 @@ docker build -t praxis-ai:dev-otel -f Containerfile "$BUILD_DIR"
 - **Grafana version**: Must use 11.x (pinned via `grafana.image.tag`). Grafana 12.0 has rendering bugs with provisioned dashboards using `row`/`gauge` panel types.
 - **Datasources**: Prometheus and Tempo datasources are added via the `datasources` stack. If Grafana restarts, they need re-adding.
 - **Tokio runtime fix**: The praxis `otel` feature requires a persistent Tokio runtime in `core/src/logging.rs` for the `BatchSpanProcessor` to drive tonic's async gRPC export.
-- **MLflow trace ingestion**: The OTel collector v0.108 sends protobuf to MLflow, but MLflow 3.x only accepts JSON OTLP. Traces go to Tempo (primary store). MLflow shows the experiment tracking UI.
+- **MLflow trace ingestion**: The OTel collector exports traces to Tempo only. MLflow is deployed for experiment tracking UI but does not receive trace data from the collector pipeline.
 
 ## Teardown
 
