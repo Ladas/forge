@@ -33,16 +33,55 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut state = state::load(&ctx.state_dir)?;
     state.runtime = Some(resolved.binary.clone());
-    let net_result = ensure_network(ctx, &resolved.binary, &mut state)?;
-    let results = create_clusters(ctx, &mut state)?;
+    let binary = resolved.binary.as_str();
+    let net_result = checkpointed(ctx, &mut state, |st| ensure_network(ctx, binary, st))?;
+    let results = checkpointed(ctx, &mut state, |st| create_clusters(ctx, st))?;
     export_kubeconfigs(ctx, &state)?;
-    let svc_results = start_services(ctx, &resolved.binary, &mut state)?;
+    let svc_results = checkpointed(ctx, &mut state, |st| start_services(ctx, binary, st))?;
     update_digest(ctx, &mut state)?;
     record_operation(&mut state, "up", true);
-    if !ctx.dry_run {
-        state::save(&ctx.state_dir, &state)?;
-    }
+    checkpoint(ctx, &state)?;
     render_all(writer, &net_result, &results, &svc_results, &ctx.format)
+}
+
+// ---------------------------------------------------------------
+// Checkpointing
+// ---------------------------------------------------------------
+
+/// Persist the working state, unless this is a dry run.
+///
+/// # Errors
+///
+/// Returns [`ForgeError`] if the state file cannot be written.
+fn checkpoint(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Result<(), ForgeError> {
+    if ctx.dry_run {
+        return Ok(());
+    }
+    state::save(&ctx.state_dir, state)
+}
+
+/// Run one phase of `up` and persist whatever it recorded, pass or fail.
+///
+/// Each phase creates real resources — a network, KIND clusters,
+/// containers — before it can fail. Persisting only after every phase
+/// succeeded would leave those resources unrecorded whenever a later
+/// phase fails, and `forge down` acts solely on what state records, so
+/// they would be orphaned with no supported way to remove them.
+///
+/// # Errors
+///
+/// Returns the phase's error if it failed, otherwise any checkpoint error.
+fn checkpointed<T>(
+    ctx: &ForgeContext<'_>,
+    state: &mut state::ForgeState,
+    phase: impl FnOnce(&mut state::ForgeState) -> Result<T, ForgeError>,
+) -> Result<T, ForgeError> {
+    let outcome = phase(state);
+    let persisted = checkpoint(ctx, state);
+    // A phase failure is what the user has to act on; reporting a checkpoint
+    // failure instead would hide the reason the run stopped.
+    let value = outcome?;
+    persisted.map(|()| value)
 }
 
 // ---------------------------------------------------------------
@@ -990,6 +1029,89 @@ spec:
             "should report network: {text}"
         );
         assert_kind_create_has_network_env(&runner, "test-net");
+    }
+
+    /// A failing `kind get clusters` probe.
+    fn kind_list_failed() -> CommandOutput {
+        CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "kind: connection refused\n".to_owned(),
+        }
+    }
+
+    #[test]
+    fn up_records_earlier_phase_when_later_phase_fails() {
+        let dir = test_dir();
+        let config = test_config_with_network();
+        let mut runner = MockRunner::new();
+        runner.respond("docker version", docker_ok());
+        runner.respond("docker network inspect test-net", net_not_found());
+        runner.respond(
+            "docker network inspect test-net --format {{json .IPAM.Config}}",
+            network_cidr("172.18.0.0/16"),
+        );
+        runner.respond("docker", empty_ok());
+        runner.respond("kind get clusters", kind_list_failed());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, &mut buf);
+
+        assert!(
+            result.is_err(),
+            "a failing cluster phase should fail the run"
+        );
+        assert!(
+            runner.was_called("network create"),
+            "the network phase should have created a real network"
+        );
+        assert!(
+            dir.path().join("state.json").exists(),
+            "a failed run must still persist what earlier phases created"
+        );
+        let persisted = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        let net = persisted.network;
+        assert_eq!(
+            net.as_ref().map(|n| n.name.as_str()),
+            Some("test-net"),
+            "the created network must be recorded so down can remove it"
+        );
+        assert_eq!(
+            net.map(|n| n.phase),
+            Some(NetworkPhase::Active),
+            "the recorded network should be marked active"
+        );
+    }
+
+    #[test]
+    fn up_dry_run_writes_no_state_file() {
+        let dir = test_dir();
+        let config = test_config_with_network();
+        let mut runner = MockRunner::new();
+        runner.respond("docker version", docker_ok());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: true,
+        };
+
+        let _text = run_up(&ctx);
+
+        assert!(
+            !dir.path().join("state.json").exists(),
+            "dry-run must not persist state"
+        );
     }
 
     #[test]
