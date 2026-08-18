@@ -667,6 +667,7 @@ fn check_capture_step(stack_name: &str, step: &StepSpec) -> Result<(), ForgeErro
         return Ok(());
     };
     check_non_blank(resource, &format!("stack {stack_name:?}: capture resource"))?;
+    check_not_option_like(resource, &format!("stack {stack_name:?}: capture resource"))?;
     check_non_blank(jsonpath, &format!("stack {stack_name:?}: capture jsonpath"))?;
     check_non_blank(key, &format!("stack {stack_name:?}: capture key"))?;
     check_duration_string(timeout, &format!("stack {stack_name:?}: capture timeout"))?;
@@ -819,6 +820,22 @@ fn check_relative_path(path: &str, context: &str) -> Result<(), ForgeError> {
     Ok(())
 }
 
+/// Reject a value that a tool would parse as an option rather than a positional.
+///
+/// `helm` and `kubectl` accept flags interspersed with positional arguments, so
+/// a configured chart or resource beginning with `-` is consumed as a flag —
+/// `--post-renderer=...` on a helm chart runs an arbitrary program. None of
+/// these fields legitimately starts with `-`, so refusing one only rejects
+/// input that was trying to become a flag.
+fn check_not_option_like(value: &str, context: &str) -> Result<(), ForgeError> {
+    if value.starts_with('-') {
+        return Err(ForgeError::Validation(format!(
+            "{context}: must not start with '-'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a Helm step.
 fn check_helm_step(stack_name: &str, step: &StepSpec) -> Result<(), ForgeError> {
     let StepSpec::Helm {
@@ -833,7 +850,9 @@ fn check_helm_step(stack_name: &str, step: &StepSpec) -> Result<(), ForgeError> 
     };
     check_dns_label(release, &format!("stack {stack_name:?}: helm release"))?;
     check_non_blank(chart, &format!("stack {stack_name:?}: helm chart"))?;
+    check_not_option_like(chart, &format!("stack {stack_name:?}: helm chart"))?;
     check_non_blank(version, &format!("stack {stack_name:?}: helm version"))?;
+    check_not_option_like(version, &format!("stack {stack_name:?}: helm version"))?;
     check_optional_namespace(stack_name, namespace.as_deref())
 }
 
@@ -892,6 +911,7 @@ fn check_wait_step(
     timeout: &str,
 ) -> Result<(), ForgeError> {
     check_non_blank(resource, &format!("stack {stack_name:?}: wait resource"))?;
+    check_not_option_like(resource, &format!("stack {stack_name:?}: wait resource"))?;
     check_non_blank(condition, &format!("stack {stack_name:?}: wait condition"))?;
     check_duration_string(timeout, &format!("stack {stack_name:?}: wait timeout"))
 }
@@ -1523,6 +1543,59 @@ spec:
         assert!(
             msg.contains("timeout"),
             "expected wait timeout error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn stack_helm_chart_starting_with_dash_rejected() {
+        let mut config = base_config();
+        config.spec.stacks.insert(
+            "base".to_owned(),
+            StackSpec {
+                description: None,
+                steps: vec![StepSpec::Helm {
+                    release: "web".to_owned(),
+                    // helm parses flags interspersed with positionals, so this
+                    // would run an arbitrary program at render time.
+                    chart: "--post-renderer=/tmp/evil.sh".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    namespace: None,
+                    values: BTreeMap::new(),
+                }],
+            },
+        );
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not start with '-'"),
+            "expected helm chart dash rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn stack_wait_resource_starting_with_dash_rejected() {
+        let mut config = base_config();
+        config.spec.stacks.insert(
+            "base".to_owned(),
+            StackSpec {
+                description: None,
+                steps: vec![StepSpec::Wait {
+                    resource: "--kubeconfig=/tmp/evil".to_owned(),
+                    condition: "available".to_owned(),
+                    timeout: "30s".to_owned(),
+                    namespace: None,
+                }],
+            },
+        );
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not start with '-'"),
+            "expected wait resource dash rejection, got: {msg}"
         );
     }
 
