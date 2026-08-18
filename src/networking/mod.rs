@@ -92,7 +92,8 @@ pub fn remove_network(
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError`] if the runtime binary cannot execute.
+/// Returns [`ForgeError`] if the runtime binary cannot execute, or if the
+/// inspect fails for any reason other than the network being absent.
 pub fn network_exists(
     runner: &dyn CommandRunner,
     binary: &str,
@@ -100,7 +101,28 @@ pub fn network_exists(
 ) -> Result<bool, ForgeError> {
     let spec = inspect_spec(binary, net_name);
     let output = runner.run(&spec)?;
-    Ok(output.status == 0)
+    if output.status == 0 {
+        return Ok(true);
+    }
+    // A non-zero exit means "absent" only when the runtime says so. Reporting
+    // absent for e.g. a stopped daemon makes `remove_network` a silent no-op,
+    // and `down` then records the network as Gone while it is still there.
+    if is_absent_error(&output.stderr) {
+        return Ok(false);
+    }
+    Err(ForgeError::Command {
+        program: "network inspect".to_owned(),
+        message: format!("exit code {}: {}", output.status, output.stderr.trim()),
+    })
+}
+
+/// Check whether inspect stderr reports a missing network rather than a fault.
+///
+/// Docker says "Error: No such network: x"; Podman says "network not found".
+/// A daemon or permission fault matches neither and is surfaced as an error.
+fn is_absent_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("not found") || lower.contains("no such")
 }
 
 /// Read the current IPv4 subnet from a container network.
@@ -495,6 +517,26 @@ mod tests {
         assert!(
             !runner.was_called("network rm"),
             "must not remove unmanaged network"
+        );
+    }
+
+    #[test]
+    fn exists_errors_when_runtime_fails() {
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "docker network inspect test-net",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+                    .to_owned(),
+            },
+        );
+
+        let result = network_exists(&runner, "docker", "test-net");
+        assert!(
+            result.is_err(),
+            "a runtime fault must not be reported as an absent network"
         );
     }
 

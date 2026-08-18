@@ -81,6 +81,9 @@ pub fn delete_cluster(runner: &dyn CommandRunner, kind_name: &str) -> Result<(),
 pub fn list_clusters(runner: &dyn CommandRunner) -> Result<Vec<String>, ForgeError> {
     let spec = list_spec();
     let output = runner.run(&spec)?;
+    // Without this, a failed `kind get clusters` parses as an empty list, which
+    // reads as "no clusters exist" and lets callers create over a live cluster.
+    check_success(&output, "kind get clusters")?;
     Ok(parse_cluster_list(&output))
 }
 
