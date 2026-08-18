@@ -21,8 +21,11 @@ env:
   # Pinned so the cached binary is replaced when the tool is upgraded. With a
   # constant cache key the `command -v` guard below would keep whichever
   # version first populated the cache, freezing the scanner indefinitely.
-  CARGO_AUDIT_VERSION: "0.21.2"
-  CARGO_DENY_VERSION: "0.18.2"
+  # Dependabot cannot bump these, so raise them by hand when a scanner
+  # release lands; a stale pin under-reports advisories just as a stale
+  # cache did.
+  CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_DENY_VERSION: "0.20.2"
 
 jobs:
   security-audit:
