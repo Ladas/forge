@@ -349,7 +349,7 @@ fn run_spec(params: &ServiceParams<'_>, service: &ServiceSpec) -> Result<Command
         &service.volumes,
         params.config_dir,
         params.state_dir,
-    );
+    )?;
     append_host_group_arg(&mut args, service.inherit_host_group, params.state_dir)?;
     append_env_args(&mut args, &mut redact, &service.env);
     append_restart_arg(&mut args, &service.restart);
@@ -397,16 +397,22 @@ fn append_port_args(args: &mut Vec<OsString>, ports: &[PortMapping]) {
 }
 
 /// Append `-v` volume mount arguments.
+///
+/// # Errors
+///
+/// Returns [`ForgeError::Validation`] if a source escapes its base
+/// directory.
 fn append_volume_args(
     args: &mut Vec<OsString>,
     volumes: &[VolumeMount],
     config_dir: &Path,
     state_dir: &Path,
-) {
+) -> Result<(), ForgeError> {
     for vol in volumes {
         args.push("-v".into());
-        args.push(format_volume_arg(vol, config_dir, state_dir).into());
+        args.push(format_volume_arg(vol, config_dir, state_dir)?.into());
     }
+    Ok(())
 }
 
 /// Add the invoking host group without replacing the image's configured user.
@@ -570,13 +576,22 @@ fn format_port_mapping(port: &PortMapping) -> String {
 }
 
 /// Format a volume mount as `source:target[:ro]`.
-fn format_volume_arg(vol: &VolumeMount, config_dir: &Path, state_dir: &Path) -> String {
-    let source = resolve_source(&vol.source, config_dir, state_dir);
+///
+/// # Errors
+///
+/// Returns [`ForgeError::Validation`] if the source escapes its base
+/// directory.
+fn format_volume_arg(
+    vol: &VolumeMount,
+    config_dir: &Path,
+    state_dir: &Path,
+) -> Result<String, ForgeError> {
+    let source = resolve_source(&vol.source, config_dir, state_dir)?;
     let base = format!("{}:{}", source.display(), vol.target);
     if vol.read_only {
-        format!("{base}:ro")
+        Ok(format!("{base}:ro"))
     } else {
-        base
+        Ok(base)
     }
 }
 
@@ -592,19 +607,84 @@ const RUNTIME_DIR_PREFIX: &str = ".forge/runtime/";
 /// (the Forge state directory) so services can mount runtime outputs
 /// like kubeconfigs and overlay files.  All other relative sources
 /// resolve against `config_dir` (the directory containing forge.yaml).
-fn resolve_source(source: &str, config_dir: &Path, state_dir: &Path) -> std::path::PathBuf {
+///
+/// # Errors
+///
+/// Returns [`ForgeError::Validation`] if the source leaves its base
+/// directory once symlinks are resolved.  Configuration validation only
+/// inspects the source string, so a symlink committed alongside
+/// `forge.yaml` would otherwise hand the container runtime a bind mount
+/// of any host path the symlink points at.
+fn resolve_source(
+    source: &str,
+    config_dir: &Path,
+    state_dir: &Path,
+) -> Result<std::path::PathBuf, ForgeError> {
     let path = Path::new(source);
     if path.is_absolute() {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
     if let Some(suffix) = source.strip_prefix(STATE_DIR_PREFIX) {
         let canonical = std::fs::canonicalize(state_dir).unwrap_or_else(|_| {
             std::env::current_dir()
                 .map_or_else(|_| state_dir.to_path_buf(), |cwd| cwd.join(state_dir))
         });
-        return canonical.join(suffix);
+        return ensure_contained(&canonical, &canonical.join(suffix), source);
     }
-    config_dir.join(source)
+    ensure_contained(config_dir, &config_dir.join(source), source)
+}
+
+/// Verify that `candidate` stays inside `base` once symlinks are resolved.
+///
+/// Returns the symlink-free form of `candidate` so callers hand the
+/// container runtime the same path this check approved, closing the gap
+/// between the check and the mount.
+fn ensure_contained(
+    base: &Path,
+    candidate: &Path,
+    source: &str,
+) -> Result<std::path::PathBuf, ForgeError> {
+    let root = resolve_existing_ancestor(base);
+    let resolved = resolve_existing_ancestor(candidate);
+    let has_parent_component = resolved
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if has_parent_component || !resolved.starts_with(&root) {
+        return Err(ForgeError::Validation(format!(
+            "volume source {source:?} escapes the project directory: it resolves to {} outside {}",
+            resolved.display(),
+            root.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Resolve `path` through symlinks as far as the filesystem allows.
+///
+/// A volume source need not exist yet — [`prepare_writable_volumes`]
+/// creates writable runtime directories, and `run_spec` builds its
+/// arguments before the runtime creates anything else — so a plain
+/// canonicalize would fail on legitimate paths.  Canonicalizing the
+/// deepest existing ancestor and re-appending the missing tail resolves
+/// every symlink that actually exists, which is the whole of what an
+/// attacker can redirect.
+fn resolve_existing_ancestor(path: &Path) -> std::path::PathBuf {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(cursor) {
+            let mut resolved = canonical;
+            resolved.extend(tail.iter().rev());
+            return resolved;
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                cursor = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// Ensure writable runtime directories exist before container start.
@@ -625,7 +705,7 @@ fn prepare_writable_volumes(
         if vol.read_only || !vol.source.starts_with(RUNTIME_DIR_PREFIX) {
             continue;
         }
-        let path = resolve_source(&vol.source, config_dir, state_dir);
+        let path = resolve_source(&vol.source, config_dir, state_dir)?;
         std::fs::create_dir_all(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
     }
@@ -1421,14 +1501,16 @@ mod tests {
 
     #[test]
     fn resolve_source_relative_uses_config_dir() {
-        let resolved = resolve_source("configs/app", Path::new("/env"), Path::new("/state"));
-        assert_eq!(resolved, Path::new("/env/configs/app"));
+        let resolved = resolve_source("configs/app", Path::new("/env"), Path::new("/state"))
+            .unwrap_or_else(|_| std::process::abort());
+        assert_eq!(resolved, Path::new("/env/configs/app"), "config-dir join");
     }
 
     #[test]
     fn resolve_source_absolute_unchanged() {
-        let resolved = resolve_source("/abs/path", Path::new("/env"), Path::new("/state"));
-        assert_eq!(resolved, Path::new("/abs/path"));
+        let resolved = resolve_source("/abs/path", Path::new("/env"), Path::new("/state"))
+            .unwrap_or_else(|_| std::process::abort());
+        assert_eq!(resolved, Path::new("/abs/path"), "absolute passthrough");
     }
 
     #[test]
@@ -1436,9 +1518,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
         let state = dir.path().join(".forge");
         std::fs::create_dir_all(&state).unwrap_or_else(|_| std::process::abort());
-        let resolved = resolve_source(".forge/runtime/edge", Path::new("/env"), &state);
+        let resolved = resolve_source(".forge/runtime/edge", Path::new("/env"), &state)
+            .unwrap_or_else(|_| std::process::abort());
         let canonical = std::fs::canonicalize(&state).unwrap_or_else(|_| std::process::abort());
-        assert_eq!(resolved, canonical.join("runtime/edge"));
+        assert_eq!(resolved, canonical.join("runtime/edge"), "state-dir join");
+    }
+
+    #[test]
+    fn resolve_source_rejects_symlink_escaping_config_dir() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let cfg = dir.path().join("project");
+        std::fs::create_dir_all(&cfg).unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(Path::new("/"), cfg.join("rootlink"))
+            .unwrap_or_else(|_| std::process::abort());
+
+        let result = resolve_source("rootlink/etc", &cfg, Path::new("/state"));
+
+        assert!(
+            result.is_err(),
+            "a symlink out of the config directory must not resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_source_rejects_symlink_escaping_state_dir() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let state = dir.path().join(".forge");
+        std::fs::create_dir_all(state.join("runtime")).unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(Path::new("/"), state.join("runtime/escape"))
+            .unwrap_or_else(|_| std::process::abort());
+
+        let result = resolve_source(".forge/runtime/escape", Path::new("/env"), &state);
+
+        assert!(
+            result.is_err(),
+            "a symlink out of the state directory must not resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_source_allows_ordinary_relative_source() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let cfg = dir.path().join("project");
+        std::fs::create_dir_all(cfg.join("configs/app")).unwrap_or_else(|_| std::process::abort());
+
+        let resolved = resolve_source("configs/app", &cfg, Path::new("/state"))
+            .unwrap_or_else(|_| std::process::abort());
+
+        let canonical = std::fs::canonicalize(cfg.join("configs/app"))
+            .unwrap_or_else(|_| std::process::abort());
+        assert_eq!(resolved, canonical, "in-tree source should still resolve");
+    }
+
+    #[test]
+    fn prepare_writable_volumes_rejects_symlinked_runtime_dir() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let state = dir.path().join(".forge");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(state.join("runtime")).unwrap_or_else(|_| std::process::abort());
+        std::fs::create_dir_all(&outside).unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(&outside, state.join("runtime/out"))
+            .unwrap_or_else(|_| std::process::abort());
+        let vols = vec![VolumeMount {
+            source: ".forge/runtime/out".to_owned(),
+            target: "/output".to_owned(),
+            read_only: false,
+        }];
+
+        let result = prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false);
+
+        assert!(
+            result.is_err(),
+            "must not chmod a directory outside the state directory"
+        );
     }
 
     #[test]
