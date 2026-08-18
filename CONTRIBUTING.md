@@ -8,6 +8,8 @@ proposals.
 
 - Rust stable 1.96+
 - Docker 29.3.0+ or Podman (for integration testing)
+- `kind` (for the path-independence tests, which run `forge status`; those
+  tests skip with a note on stderr when `kind get clusters` does not succeed)
 
 ## Getting Started
 

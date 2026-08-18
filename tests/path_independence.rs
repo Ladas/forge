@@ -143,31 +143,50 @@ fn version_flag_prints_version() {
 
 #[test]
 fn state_dir_flag_is_deterministic() {
-    // `status` shells out to `kind get clusters`. Without it the command fails
-    // for reasons unrelated to path independence, so state the dependency
-    // instead of asserting through it.
-    if !binary_on_path("kind") {
-        note_skip("state_dir_flag_is_deterministic: `kind` not on PATH");
+    // `status` runs `kind get clusters`. Presence on PATH is not enough — an
+    // installed kind with no reachable daemon fails the same way — so the guard
+    // runs the real probe. Without it the command fails for reasons that have
+    // nothing to do with path independence.
+    if !kind_usable() {
+        note_skip("state_dir_flag_is_deterministic: `kind get clusters` does not succeed");
         return;
     }
     let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
-    let state_dir = dir.path().join("custom-state");
     let config_path = fixtures_dir().join("glb-demo.yaml");
 
-    // Determinism means the same answer regardless of where it is run from, so
-    // the assertion has to compare two working directories, not just exit 0.
-    let from_tmp = status_json(&config_path, &state_dir, &std::env::temp_dir());
-    let from_fixtures = status_json(&config_path, &state_dir, &fixtures_dir());
+    let empty_dir = dir.path().join("empty-state");
+    let seeded_dir = dir.path().join("seeded-state");
+    std::fs::create_dir_all(&seeded_dir).unwrap_or_else(|_| std::process::abort());
+    std::fs::write(seeded_dir.join("state.json"), SEEDED_STATE)
+        .unwrap_or_else(|_| std::process::abort());
 
+    // Path independence: the same state dir must give the same answer from any
+    // working directory.
+    let from_tmp = status_json(&config_path, &seeded_dir, &std::env::temp_dir());
+    let from_fixtures = status_json(&config_path, &seeded_dir, &fixtures_dir());
     assert_eq!(
         from_tmp, from_fixtures,
         "status output must not depend on the working directory"
     );
+
+    // The flag itself: reading a seeded state dir must differ from reading an
+    // empty one. Without this the test passes with --state-dir deleted.
+    let from_empty = status_json(&config_path, &empty_dir, &std::env::temp_dir());
+    assert_ne!(
+        from_tmp, from_empty,
+        "--state-dir must select which state is read, but both dirs gave the same output"
+    );
     assert!(
-        !from_tmp.trim().is_empty(),
-        "status should emit a JSON document"
+        from_tmp.contains("glb-demo-net"),
+        "status should reflect the seeded state dir, got: {from_tmp}"
     );
 }
+
+/// A minimal state file naming a network, used to prove `--state-dir` is read.
+const SEEDED_STATE: &str = concat!(
+    r#"{"apiVersion":"forge.praxis.dev/state/v1alpha1","#,
+    r#""network":{"name":"glb-demo-net","phase":"active","cidr":"172.30.0.0/16"}}"#
+);
 
 /// Run `status --output json` from `cwd` and return stdout.
 fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
@@ -192,22 +211,21 @@ fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
 }
 
 /// Report a skipped test on stderr.
-///
-/// Written through [`std::io::Write`] rather than `eprintln!` because the crate
-/// denies `clippy::print_stderr`, and a skip that says nothing is worse than the
-/// lint it would dodge.
+#[expect(
+    clippy::print_stderr,
+    reason = "a skipped test must say so; this mirrors the exception in src/main.rs"
+)]
 fn note_skip(message: &str) {
-    use std::io::Write as _;
-    let mut err = std::io::stderr();
-    let _written = err.write_all(format!("skipping {message}\n").as_bytes());
+    eprintln!("skipping {message}");
 }
 
-/// Check whether an executable is resolvable on `PATH`.
-fn binary_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+/// Check whether `kind` is present AND able to answer a cluster query.
+fn kind_usable() -> bool {
+    std::process::Command::new("kind")
+        .arg("get")
+        .arg("clusters")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 #[test]
