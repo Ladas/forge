@@ -78,10 +78,20 @@ fn checkpointed<T>(
 ) -> Result<T, ForgeError> {
     let outcome = phase(state);
     let persisted = checkpoint(ctx, state);
-    // A phase failure is what the user has to act on; reporting a checkpoint
-    // failure instead would hide the reason the run stopped.
-    let value = outcome?;
-    persisted.map(|()| value)
+    match (outcome, persisted) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(save_err)) => Err(save_err),
+        (Err(phase_err), Ok(())) => Err(phase_err),
+        // Both failing is the one case that must not be reported as either one
+        // alone: the phase error is what stopped the run, but a lost checkpoint
+        // means the resources it already created are unrecorded, and a user
+        // told only "cluster creation failed" would expect `down` to clean up.
+        (Err(phase_err), Err(save_err)) => Err(ForgeError::State(format!(
+            "{phase_err}; the state file could not be written either, so \
+             resources created before the failure are not recorded and \
+             `forge down` will not remove them: {save_err}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------
@@ -118,6 +128,9 @@ fn ensure_network(
         }));
     }
     networking::create_network(ctx.runner, binary, &net_name, env_name)?;
+    // The network exists from here on. inspect_network_cidr can still fail, and
+    // until the network is in state `down` has no way to remove it.
+    set_network_created(state, &net_name);
     let cidr = networking::inspect_network_cidr(ctx.runner, binary, &net_name)?;
     set_network_active(state, &net_name, &cidr);
     Ok(Some(NetworkSetup {
@@ -133,6 +146,28 @@ fn wants_network(ctx: &ForgeContext<'_>) -> bool {
         .network
         .as_ref()
         .is_some_and(|n| n.cross_cluster)
+}
+
+/// Record a network that exists but whose CIDR is not known yet.
+///
+/// Renaming the network invalidates any pool allocation derived from the old
+/// one, so those are dropped alongside the stale CIDR.
+fn set_network_created(state: &mut state::ForgeState, name: &str) {
+    if let Some(ref mut net) = state.network {
+        if net.name != name {
+            net.cluster_pools.clear();
+            name.clone_into(&mut net.name);
+            net.cidr = None;
+        }
+        net.phase = NetworkPhase::Active;
+        return;
+    }
+    state.network = Some(state::NetworkState {
+        name: name.to_owned(),
+        phase: NetworkPhase::Active,
+        cidr: None,
+        cluster_pools: Vec::new(),
+    });
 }
 
 /// Record the live network identity, preserving only compatible pools.
@@ -1088,6 +1123,88 @@ spec:
             net.map(|n| n.phase),
             Some(NetworkPhase::Active),
             "the recorded network should be marked active"
+        );
+    }
+
+    #[test]
+    fn up_records_network_when_cidr_inspect_fails() {
+        let dir = test_dir();
+        let config = test_config_with_network();
+        let mut runner = MockRunner::new();
+        runner.respond("docker version", docker_ok());
+        runner.respond("docker network inspect test-net", net_not_found());
+        // The network is created, then the CIDR inspect fails. The network is
+        // live either way, so it has to be recorded for `down` to remove it.
+        runner.respond(
+            "docker network inspect test-net --format {{json .IPAM.Config}}",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "inspect blew up\n".to_owned(),
+            },
+        );
+        runner.respond("docker", empty_ok());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, &mut buf);
+
+        assert!(
+            result.is_err(),
+            "a failing CIDR inspect should fail the run"
+        );
+        assert!(
+            runner.was_called("network create"),
+            "the network should really have been created"
+        );
+        let persisted = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            persisted.network.map(|n| n.name),
+            Some("test-net".to_owned()),
+            "a created network must be recorded even when the CIDR lookup fails"
+        );
+    }
+
+    #[test]
+    fn checkpoint_failure_is_reported_alongside_the_phase_failure() {
+        let dir = test_dir();
+        let config = test_config_with_network();
+        let runner = MockRunner::new();
+        // A regular file where the state directory should be, so `save` fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap_or_else(|_| std::process::abort());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: blocker.join("state"),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut state = state::empty();
+        let outcome: Result<(), ForgeError> = checkpointed(&ctx, &mut state, |_st| {
+            Err(ForgeError::State("phase blew up".to_owned()))
+        });
+
+        let Err(err) = outcome else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("phase blew up"),
+            "the phase failure must stay visible: {msg}"
+        );
+        assert!(
+            msg.contains("not recorded"),
+            "a lost checkpoint must be reported too: {msg}"
         );
     }
 
