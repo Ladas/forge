@@ -143,25 +143,71 @@ fn version_flag_prints_version() {
 
 #[test]
 fn state_dir_flag_is_deterministic() {
+    // `status` shells out to `kind get clusters`. Without it the command fails
+    // for reasons unrelated to path independence, so state the dependency
+    // instead of asserting through it.
+    if !binary_on_path("kind") {
+        note_skip("state_dir_flag_is_deterministic: `kind` not on PATH");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
     let state_dir = dir.path().join("custom-state");
     let config_path = fixtures_dir().join("glb-demo.yaml");
+
+    // Determinism means the same answer regardless of where it is run from, so
+    // the assertion has to compare two working directories, not just exit 0.
+    let from_tmp = status_json(&config_path, &state_dir, &std::env::temp_dir());
+    let from_fixtures = status_json(&config_path, &state_dir, &fixtures_dir());
+
+    assert_eq!(
+        from_tmp, from_fixtures,
+        "status output must not depend on the working directory"
+    );
+    assert!(
+        !from_tmp.trim().is_empty(),
+        "status should emit a JSON document"
+    );
+}
+
+/// Run `status --output json` from `cwd` and return stdout.
+fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
     let output = std::process::Command::new(forge_binary())
         .arg("--config")
-        .arg(&config_path)
+        .arg(config_path)
         .arg("--state-dir")
-        .arg(&state_dir)
+        .arg(state_dir)
         .arg("--output")
         .arg("json")
         .arg("status")
-        .current_dir(std::env::temp_dir())
+        .current_dir(cwd)
         .output()
         .unwrap_or_else(|_| std::process::abort());
     assert!(
         output.status.success(),
-        "status with custom state-dir should succeed: {}",
+        "status with custom state-dir should succeed from {}: {}",
+        cwd.display(),
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Report a skipped test on stderr.
+///
+/// Written through [`std::io::Write`] rather than `eprintln!` because the crate
+/// denies `clippy::print_stderr`, and a skip that says nothing is worse than the
+/// lint it would dodge.
+fn note_skip(message: &str) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr();
+    let _written = err.write_all(format!("skipping {message}\n").as_bytes());
+}
+
+/// Check whether an executable is resolvable on `PATH`.
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
 #[test]
