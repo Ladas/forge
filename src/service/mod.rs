@@ -644,8 +644,10 @@ fn ensure_contained(
     candidate: &Path,
     source: &str,
 ) -> Result<std::path::PathBuf, ForgeError> {
-    let root = resolve_existing_ancestor(base);
-    let resolved = resolve_existing_ancestor(candidate);
+    let root = resolve_existing_ancestor(base)
+        .map_err(|e| ForgeError::Validation(format!("volume source {source:?}: {e}")))?;
+    let resolved = resolve_existing_ancestor(candidate)
+        .map_err(|e| ForgeError::Validation(format!("volume source {source:?}: {e}")))?;
     let has_parent_component = resolved
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir));
@@ -668,21 +670,40 @@ fn ensure_contained(
 /// deepest existing ancestor and re-appending the missing tail resolves
 /// every symlink that actually exists, which is the whole of what an
 /// attacker can redirect.
-fn resolve_existing_ancestor(path: &Path) -> std::path::PathBuf {
+fn resolve_existing_ancestor(path: &Path) -> Result<std::path::PathBuf, String> {
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     let mut cursor = path;
     loop {
-        if let Ok(canonical) = std::fs::canonicalize(cursor) {
-            let mut resolved = canonical;
-            resolved.extend(tail.iter().rev());
-            return resolved;
+        match std::fs::canonicalize(cursor) {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                resolved.extend(tail.iter().rev());
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // An absent component is fine: a runtime directory may be created
+                // later. A component that exists as a symlink yet still fails to
+                // canonicalize is dangling, and treating it as absent would return
+                // the unresolved link for the runtime to follow out of the base.
+                if std::fs::symlink_metadata(cursor).is_ok() {
+                    return Err(format!(
+                        "{} is a symlink that does not resolve",
+                        cursor.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                // Anything else — a symlink loop, an unreadable parent — leaves the
+                // real target unknown, so it cannot be approved.
+                return Err(format!("cannot resolve {}: {e}", cursor.display()));
+            }
         }
         match (cursor.parent(), cursor.file_name()) {
             (Some(parent), Some(name)) => {
                 tail.push(name);
                 cursor = parent;
             }
-            _ => return path.to_path_buf(),
+            _ => return Ok(path.to_path_buf()),
         }
     }
 }
@@ -1553,6 +1574,40 @@ mod tests {
         assert!(
             result.is_err(),
             "a symlink out of the state directory must not resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_source_rejects_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap_or_else(|_| std::process::abort());
+        // Target does not exist yet, so canonicalize fails the same way an absent
+        // path does. Once the target appears the runtime would follow it outside.
+        std::os::unix::fs::symlink(dir.path().join("later"), project.join("laterlink"))
+            .unwrap_or_else(|_| std::process::abort());
+
+        let result = resolve_source("laterlink", &project, dir.path());
+        assert!(
+            result.is_err(),
+            "a dangling symlink must not be mistaken for a not-yet-created path"
+        );
+    }
+
+    #[test]
+    fn resolve_source_rejects_symlink_loop() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(project.join("loopb"), project.join("loopa"))
+            .unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(project.join("loopa"), project.join("loopb"))
+            .unwrap_or_else(|_| std::process::abort());
+
+        let result = resolve_source("loopa", &project, dir.path());
+        assert!(
+            result.is_err(),
+            "a symlink loop leaves the target unknown and must be rejected"
         );
     }
 
