@@ -152,6 +152,11 @@ fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
         .mode(KUBECONFIG_FILE_MODE)
         .open(&tmp_path)
         .map_err(ForgeError::Io)?;
+    // `mode` above applies only when the file is created. A tmp file left by a
+    // killed run keeps its old mode through truncate, and rename would carry
+    // that mode onto the kubeconfig, so set it on the open handle too.
+    file.set_permissions(std::fs::Permissions::from_mode(KUBECONFIG_FILE_MODE))
+        .map_err(ForgeError::Io)?;
     std::io::Write::write_all(&mut &file, content.as_bytes()).map_err(ForgeError::Io)?;
     file.sync_all().map_err(ForgeError::Io)?;
     drop(file);
@@ -194,6 +199,32 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(dir_mode, KUBECONFIG_DIR_MODE, "kubeconfig dir must be 0700");
+    }
+
+    #[test]
+    fn stale_tmp_does_not_leak_its_mode_onto_the_kubeconfig() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let dir = tmp.path().join("kubeconfig").join("hub");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| std::process::abort());
+        // A tmp file left behind by a killed run, with the old world-readable mode.
+        let stale = dir.join("config.tmp");
+        std::fs::write(&stale, b"stale").unwrap_or_else(|_| std::process::abort());
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|_| std::process::abort());
+
+        write_kubeconfig_file(&dir, "apiVersion: v1\n").unwrap_or_else(|_| std::process::abort());
+
+        let mode = std::fs::metadata(dir.join("config"))
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, KUBECONFIG_FILE_MODE,
+            "a reused tmp file must not carry its old mode onto the kubeconfig"
+        );
     }
 
     /// Build a minimal kubeconfig YAML with the given server URL.

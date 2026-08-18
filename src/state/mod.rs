@@ -406,7 +406,7 @@ fn read_state(path: &Path) -> Result<ForgeState, ForgeError> {
 
 /// Write state to a temporary file in the state directory.
 fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeError> {
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
     let tmp = state_dir.join(STATE_TMP);
     let json = serde_json::to_string_pretty(state)
@@ -420,6 +420,11 @@ fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeErro
         .mode(STATE_FILE_MODE)
         .open(&tmp)
         .map_err(|e| ForgeError::State(format!("cannot create {}: {e}", tmp.display())))?;
+    // `mode` above applies only when the file is created. A tmp file left by a
+    // killed run keeps its old mode through truncate, and rename would carry
+    // that mode onto the state file, so set it on the open handle too.
+    file.set_permissions(std::fs::Permissions::from_mode(STATE_FILE_MODE))
+        .map_err(|e| ForgeError::State(format!("cannot set mode on {}: {e}", tmp.display())))?;
     file.write_all(json.as_bytes())
         .map_err(|e| ForgeError::State(format!("cannot write {}: {e}", tmp.display())))?;
     Ok(tmp)
@@ -480,6 +485,32 @@ mod tests {
         assert_eq!(
             dir_mode, STATE_DIR_MODE,
             "state dir must not be group- or world-readable"
+        );
+    }
+
+    #[test]
+    fn stale_tmp_does_not_leak_its_mode_onto_state_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let state_dir = dir.path().join("state");
+        ensure_dir(&state_dir).unwrap_or_else(|_| std::process::abort());
+        // A tmp file left behind by a killed run, with the old world-readable mode.
+        let stale = state_dir.join(STATE_TMP);
+        std::fs::write(&stale, b"stale").unwrap_or_else(|_| std::process::abort());
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|_| std::process::abort());
+
+        save(&state_dir, &empty()).unwrap_or_else(|_| std::process::abort());
+
+        let mode = std::fs::metadata(state_path(&state_dir))
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, STATE_FILE_MODE,
+            "a reused tmp file must not carry its old mode onto the state file"
         );
     }
 
