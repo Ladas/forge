@@ -462,7 +462,12 @@ fn append_restart_arg(args: &mut Vec<OsString>, restart: &RestartPolicy) {
 }
 
 /// Append the image name and optional command arguments.
+///
+/// The `--` terminator stops the runtime parsing anything that follows as an
+/// option, so an image or command argument beginning with `-` is treated as the
+/// positional value it is meant to be rather than as a `docker run` flag.
 fn append_image_and_cmd(args: &mut Vec<OsString>, image: &str, cmd_args: &[String]) {
+    args.push("--".into());
     args.push(image.into());
     for a in cmd_args {
         args.push(a.into());
@@ -1355,6 +1360,31 @@ mod tests {
         assert!(
             !display.contains("--privileged"),
             "should not include --privileged: {display}"
+        );
+    }
+
+    #[test]
+    fn run_spec_terminates_options_before_the_image() {
+        let mut svc = minimal_service();
+        // An image that would otherwise be parsed as a `docker run` flag.
+        svc.image = "--volume=/:/host".to_owned();
+        svc.args = vec!["alpine".to_owned()];
+        let p = spec_params(
+            "env-svc",
+            "env",
+            Path::new("/tmp"),
+            Path::new("/tmp/.forge"),
+        );
+        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let pos = spec
+            .args
+            .iter()
+            .position(|a| a == "--")
+            .unwrap_or_else(|| std::process::abort());
+        assert_eq!(
+            spec.args.get(pos + 1).map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("--volume=/:/host")),
+            "image must sit immediately after the `--` terminator"
         );
     }
 

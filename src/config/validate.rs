@@ -208,6 +208,14 @@ fn check_service_image(svc: &ServiceSpec) -> Result<(), ForgeError> {
             "{ctx}: exceeds 512 characters"
         )));
     }
+    // Rejected here as well as terminated with `--` at the call site: no image
+    // reference legally starts with '-', so this only ever refuses input that
+    // was trying to become a runtime flag.
+    if svc.image.starts_with('-') {
+        return Err(ForgeError::Validation(format!(
+            "{ctx}: must not start with '-'"
+        )));
+    }
     Ok(())
 }
 
@@ -1687,6 +1695,27 @@ spec:
         assert!(
             msg.contains("port must not be zero"),
             "expected port zero error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn service_image_starting_with_dash_rejected() {
+        let mut config = base_config();
+        let mut svc = test_service_with_port(PortMapping {
+            bind_address: None,
+            host: 8080,
+            container: 8080,
+            protocol: "tcp".to_owned(),
+        });
+        svc.image = "--volume=/:/host".to_owned();
+        config.spec.services = vec![svc];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not start with '-'"),
+            "expected leading-dash image rejection, got: {msg}"
         );
     }
 
