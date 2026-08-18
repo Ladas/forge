@@ -24,17 +24,35 @@ pub fn parse_duration(s: &str) -> Result<Duration, ForgeError> {
         let val: u64 = ms
             .parse()
             .map_err(|e| ForgeError::Config(format!("invalid duration '{s}': {e}")))?;
-        return Ok(Duration::from_millis(val));
+        return bounded(Duration::from_millis(val), s);
     }
     if let Some(secs) = s.strip_suffix('s') {
         let val: u64 = secs
             .parse()
             .map_err(|e| ForgeError::Config(format!("invalid duration '{s}': {e}")))?;
-        return Ok(Duration::from_secs(val));
+        return bounded(Duration::from_secs(val), s);
     }
     Err(ForgeError::Config(format!(
         "unsupported duration format '{s}' (expected '2s' or '500ms')"
     )))
+}
+
+/// Upper bound for a parsed duration (24 hours).
+///
+/// Callers add the result to [`std::time::Instant`], which panics on overflow.
+/// Validation rejects oversized values first; this is the backstop for any path
+/// that reaches the parser without having gone through it.
+const MAX_DURATION: Duration = Duration::from_secs(86_400);
+
+/// Reject a duration beyond [`MAX_DURATION`].
+fn bounded(value: Duration, raw: &str) -> Result<Duration, ForgeError> {
+    if value > MAX_DURATION {
+        return Err(ForgeError::Config(format!(
+            "duration '{raw}' exceeds the maximum of {}s",
+            MAX_DURATION.as_secs()
+        )));
+    }
+    Ok(value)
 }
 
 // -------------------------------------------------------------
@@ -83,6 +101,28 @@ pub fn wait_for_healthy(addr: &str, port: u16, check: &HealthCheck) -> Result<bo
 /// Sleep for the given duration (synchronous).
 fn sleep_interval(dur: Duration) {
     std::thread::sleep(dur);
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_rejects_values_that_would_overflow_instant() {
+        // Instant::now() + Duration::from_secs(u64::MAX) panics inside std, so
+        // the parser must refuse the value rather than hand it to a caller.
+        let result = parse_duration(&format!("{}s", u64::MAX));
+        assert!(
+            result.is_err(),
+            "u64::MAX seconds must be rejected, not returned"
+        );
+    }
+
+    #[test]
+    fn parse_duration_accepts_a_full_day() {
+        let result = parse_duration("86400s");
+        assert!(result.is_ok(), "24h is within the supported range");
+    }
 }
 
 #[cfg(test)]

@@ -394,27 +394,40 @@ fn check_health_port_is_reachable(svc: &ServiceSpec, hc: &HealthCheck) -> Result
     )))
 }
 
+/// Upper bound for any configured duration, in seconds (24 hours).
+///
+/// Durations are added to [`std::time::Instant`], which panics on overflow, so
+/// an unbounded value is a crash rather than a long wait. No development
+/// environment operation legitimately waits longer than a day.
+const MAX_DURATION_SECS: u64 = 86_400;
+
 /// Validate a duration string (`"Ns"` or `"Nms"` where N is a positive integer).
 fn check_duration_string(value: &str, context: &str) -> Result<(), ForgeError> {
-    if let Some(n) = value.strip_suffix("ms") {
-        return check_positive_integer(n, context);
-    }
-    if let Some(n) = value.strip_suffix('s') {
-        return check_positive_integer(n, context);
-    }
-    Err(ForgeError::Validation(format!(
-        "{context}: {value:?} must end in \"s\" or \"ms\""
-    )))
-}
-
-/// Validate that a string is a positive integer.
-fn check_positive_integer(value: &str, context: &str) -> Result<(), ForgeError> {
-    match value.parse::<u64>() {
-        Ok(0) | Err(_) => Err(ForgeError::Validation(format!(
+    let (digits, max, unit) = if let Some(n) = value.strip_suffix("ms") {
+        (n, MAX_DURATION_SECS.saturating_mul(1000), "ms")
+    } else if let Some(n) = value.strip_suffix('s') {
+        (n, MAX_DURATION_SECS, "s")
+    } else {
+        return Err(ForgeError::Validation(format!(
+            "{context}: {value:?} must end in \"s\" or \"ms\""
+        )));
+    };
+    let Ok(parsed) = digits.parse::<u64>() else {
+        return Err(ForgeError::Validation(format!(
             "{context}: expected a positive integer"
-        ))),
-        Ok(_) => Ok(()),
+        )));
+    };
+    if parsed == 0 {
+        return Err(ForgeError::Validation(format!(
+            "{context}: expected a positive integer"
+        )));
     }
+    if parsed > max {
+        return Err(ForgeError::Validation(format!(
+            "{context}: must not exceed {max}{unit}"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate that all service dependency references are valid.
