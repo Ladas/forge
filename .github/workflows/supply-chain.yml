@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Advisories are published against a dependency set that does not change
+  # when nobody commits, so the scan has to run on a clock, not on pushes.
+  schedule:
+    - cron: "0 6 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,10 +17,18 @@ concurrency:
 
 permissions: {}
 
+env:
+  # Pinned so the cached binary is replaced when the tool is upgraded. With a
+  # constant cache key the `command -v` guard below would keep whichever
+  # version first populated the cache, freezing the scanner indefinitely.
+  CARGO_AUDIT_VERSION: "0.21.2"
+  CARGO_DENY_VERSION: "0.18.2"
+
 jobs:
   security-audit:
     name: Cargo audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -25,14 +37,17 @@ jobs:
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-audit
+          key: ${{ runner.os }}-cargo-bin-audit-${{ env.CARGO_AUDIT_VERSION }}
       - name: Install cargo-audit
-        run: command -v cargo-audit || cargo install cargo-audit --locked
+        run: |
+          command -v cargo-audit \
+            || cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
       - run: cargo audit
 
   dependency-check:
     name: Cargo deny
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -41,7 +56,9 @@ jobs:
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-deny
+          key: ${{ runner.os }}-cargo-bin-deny-${{ env.CARGO_DENY_VERSION }}
       - name: Install cargo-deny
-        run: command -v cargo-deny || cargo install cargo-deny --locked
+        run: |
+          command -v cargo-deny \
+            || cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
       - run: cargo deny check

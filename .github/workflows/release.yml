@@ -18,6 +18,7 @@ jobs:
   validate:
     name: Validate tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -36,6 +37,7 @@ jobs:
     name: Test
     needs: validate
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -47,6 +49,7 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: test
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -61,8 +64,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: |
-          rustup target add ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -98,6 +102,7 @@ jobs:
     name: Checksums and release
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
       attestations: write

@@ -20,6 +20,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -32,6 +33,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -51,6 +53,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -68,6 +71,7 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     env:

@@ -20,6 +20,7 @@ jobs:
   msrv:
     name: Rust 1.96 MSRV
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
