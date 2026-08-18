@@ -13,6 +13,11 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Forge state directory
+# Holds state.json and exported KIND kubeconfigs, which embed cluster
+# client certificates and private keys. Never commit these.
+.forge/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
