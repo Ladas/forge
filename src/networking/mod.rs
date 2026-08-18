@@ -110,19 +110,28 @@ pub fn network_exists(
     if is_absent_error(&output.stderr) {
         return Ok(false);
     }
-    Err(ForgeError::Command {
-        program: "network inspect".to_owned(),
-        message: format!("exit code {}: {}", output.status, output.stderr.trim()),
-    })
+    // Reuses the shared error shape; the Ok arm is unreachable because a zero
+    // status returned above.
+    check_success(&output, "network inspect").map(|()| false)
 }
 
 /// Check whether inspect stderr reports a missing network rather than a fault.
 ///
-/// Docker says "Error: No such network: x"; Podman says "network not found".
-/// A daemon or permission fault matches neither and is surfaced as an error.
+/// The message has to name a network *and* report it missing. Matching absence
+/// wording alone is not enough: with the daemon down, Docker reports
+/// "connect: no such file or directory", which says "no such" while proving
+/// nothing about the network. Treating that as absence is precisely the bug
+/// this function exists to prevent.
+///
+/// Real absent-network wording, all of which names a network:
+/// - Docker: `Error: No such network: x`
+/// - Docker: `Error response from daemon: network x not found`
+/// - Podman: `unable to find network with name or ID x: network not found`
 fn is_absent_error(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
-    lower.contains("not found") || lower.contains("no such")
+    let names_a_network = lower.contains("network");
+    let reports_absence = lower.contains("not found") || lower.contains("no such");
+    names_a_network && reports_absence
 }
 
 /// Read the current IPv4 subnet from a container network.
@@ -527,8 +536,13 @@ mod tests {
             "docker network inspect test-net",
             CommandOutput {
                 status: 1,
-                stdout: String::new(),
-                stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+                stdout: "[]\n".to_owned(),
+                // Verbatim from Docker 29.3.1 with the daemon stopped. It says
+                // "no such", which an absence-wording-only matcher accepts.
+                stderr: "failed to connect to the docker API at \
+                         unix:///var/run/docker.sock; check if the path is correct \
+                         and if the daemon is running: dial unix \
+                         /var/run/docker.sock: connect: no such file or directory"
                     .to_owned(),
             },
         );
@@ -536,8 +550,39 @@ mod tests {
         let result = network_exists(&runner, "docker", "test-net");
         assert!(
             result.is_err(),
-            "a runtime fault must not be reported as an absent network"
+            "a stopped daemon must not be reported as an absent network"
         );
+    }
+
+    #[test]
+    fn absent_network_wording_is_recognised() {
+        for stderr in [
+            "Error: No such network: test-net",
+            "Error response from daemon: network test-net not found",
+            "unable to find network with name or ID test-net: network not found",
+        ] {
+            assert!(
+                is_absent_error(stderr),
+                "real absent-network wording should be recognised: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_fault_wording_is_not_absence() {
+        for stderr in [
+            "failed to connect to the docker API at unix:///var/run/docker.sock: \
+             dial unix /var/run/docker.sock: connect: no such file or directory",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?",
+            "Error: context \"missing\" not found",
+            "permission denied while trying to connect to the Docker daemon socket",
+        ] {
+            assert!(
+                !is_absent_error(stderr),
+                "a runtime fault must not read as absence: {stderr}"
+            );
+        }
     }
 
     #[test]

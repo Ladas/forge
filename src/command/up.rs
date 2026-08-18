@@ -659,7 +659,7 @@ spec:
         CommandOutput {
             status: 1,
             stdout: String::new(),
-            stderr: "not found\n".to_owned(),
+            stderr: "docker: command not found\n".to_owned(),
         }
     }
 
@@ -1014,12 +1014,12 @@ spec:
         })
     }
 
-    /// Network not-found response for inspect.
+    /// Network not-found response for inspect, worded as Docker words it.
     fn net_not_found() -> CommandOutput {
         CommandOutput {
             status: 1,
             stdout: String::new(),
-            stderr: "not found\n".to_owned(),
+            stderr: "Error: No such network: test-net\n".to_owned(),
         }
     }
 
