@@ -123,12 +123,35 @@ fn is_loopback_host(host: &str) -> bool {
 // File output
 // ---------------------------------------------------------------
 
+/// Directory mode for exported kubeconfigs: owner-only.
+const KUBECONFIG_DIR_MODE: u32 = 0o700;
+
+/// File mode for exported kubeconfigs: owner read/write only.
+const KUBECONFIG_FILE_MODE: u32 = 0o600;
+
 /// Write kubeconfig content atomically to `{dir}/config`.
+///
+/// The content carries `client-certificate-data` and `client-key-data` granting
+/// cluster-admin, so the file is created 0600 and its directory 0700 rather than
+/// inheriting the process umask, which on a default umask 022 would publish
+/// admin credentials to every account on the host.
 fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
     std::fs::create_dir_all(dir).map_err(ForgeError::Io)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(KUBECONFIG_DIR_MODE))
+        .map_err(ForgeError::Io)?;
+
     let final_path = dir.join("config");
     let tmp_path = dir.join("config.tmp");
-    let file = std::fs::File::create(&tmp_path).map_err(ForgeError::Io)?;
+    // Mode is applied at create() so the key material is never briefly readable.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(KUBECONFIG_FILE_MODE)
+        .open(&tmp_path)
+        .map_err(ForgeError::Io)?;
     std::io::Write::write_all(&mut &file, content.as_bytes()).map_err(ForgeError::Io)?;
     file.sync_all().map_err(ForgeError::Io)?;
     drop(file);
@@ -140,6 +163,38 @@ fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
 mod tests {
     use super::*;
     use crate::command::runner::{CommandOutput, MockRunner};
+
+    #[test]
+    fn written_kubeconfig_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        });
+        let dir = tmp.path().join("kubeconfig").join("hub");
+        write_kubeconfig_file(&dir, "apiVersion: v1\n").unwrap_or_else(|_| std::process::abort());
+
+        let file_mode = std::fs::metadata(dir.join("config"))
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, KUBECONFIG_FILE_MODE,
+            "kubeconfig carries client key material and must be 0600"
+        );
+
+        let dir_mode = std::fs::metadata(&dir)
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, KUBECONFIG_DIR_MODE, "kubeconfig dir must be 0700");
+    }
 
     /// Build a minimal kubeconfig YAML with the given server URL.
     fn sample_kubeconfig(server_url: &str) -> String {

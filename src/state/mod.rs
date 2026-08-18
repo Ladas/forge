@@ -26,6 +26,12 @@ const STATE_FILE: &str = "state.json";
 /// Temporary state file name for atomic writes.
 const STATE_TMP: &str = "state.json.tmp";
 
+/// File mode for the state file: owner read/write only.
+const STATE_FILE_MODE: u32 = 0o600;
+
+/// Directory mode for the state directory: owner-only.
+const STATE_DIR_MODE: u32 = 0o700;
+
 // ---------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------
@@ -279,12 +285,23 @@ pub fn save(state_dir: &Path, state: &ForgeState) -> Result<(), ForgeError> {
 ///
 /// Returns [`ForgeError::State`] if directory creation fails.
 pub fn ensure_dir(state_dir: &Path) -> Result<(), ForgeError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     std::fs::create_dir_all(state_dir).map_err(|e| {
         ForgeError::State(format!(
             "cannot create state dir {}: {e}",
             state_dir.display()
         ))
-    })
+    })?;
+    // The directory also holds exported kubeconfigs under runtime/kubeconfig.
+    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(STATE_DIR_MODE)).map_err(
+        |e| {
+            ForgeError::State(format!(
+                "cannot set mode on state dir {}: {e}",
+                state_dir.display()
+            ))
+        },
+    )
 }
 
 // ---------------------------------------------------------------
@@ -389,10 +406,19 @@ fn read_state(path: &Path) -> Result<ForgeState, ForgeError> {
 
 /// Write state to a temporary file in the state directory.
 fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let tmp = state_dir.join(STATE_TMP);
     let json = serde_json::to_string_pretty(state)
         .map_err(|e| ForgeError::State(format!("cannot serialize state: {e}")))?;
-    let mut file = std::fs::File::create(&tmp)
+    // Captures hold values read straight out of cluster objects, so the file is
+    // created 0600 rather than inheriting the umask.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(STATE_FILE_MODE)
+        .open(&tmp)
         .map_err(|e| ForgeError::State(format!("cannot create {}: {e}", tmp.display())))?;
     file.write_all(json.as_bytes())
         .map_err(|e| ForgeError::State(format!("cannot write {}: {e}", tmp.display())))?;
@@ -421,6 +447,41 @@ fn rename_state(tmp: &Path, final_path: &Path) -> Result<(), ForgeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_writes_owner_only_state_file_and_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        });
+        let state_dir = dir.path().join("state");
+        save(&state_dir, &empty()).unwrap_or_else(|_| std::process::abort());
+
+        let file_mode = std::fs::metadata(state_path(&state_dir))
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, STATE_FILE_MODE,
+            "state file must not be group- or world-readable"
+        );
+
+        let dir_mode = std::fs::metadata(&state_dir)
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, STATE_DIR_MODE,
+            "state dir must not be group- or world-readable"
+        );
+    }
 
     #[test]
     fn empty_state_has_correct_api_version() {
