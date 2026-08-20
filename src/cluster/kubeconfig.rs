@@ -31,10 +31,7 @@ pub fn export_kubeconfig(
         )));
     }
     let rewritten = rewrite_kubeconfig(&raw, kind_name)?;
-    let dir = state_dir
-        .join("runtime")
-        .join("kubeconfig")
-        .join(cluster_name);
+    let dir = state_dir.join("runtime").join("kubeconfig").join(cluster_name);
     write_kubeconfig_file(&dir, &rewritten)
 }
 
@@ -60,10 +57,7 @@ pub fn rewrite_kubeconfig(yaml: &str, kind_name: &str) -> Result<String, ForgeEr
 
 /// Rewrite server URLs in all kubeconfig cluster entries.
 fn rewrite_cluster_entries(doc: &mut serde_yaml::Value, kind_name: &str) {
-    let Some(clusters) = doc
-        .get_mut("clusters")
-        .and_then(serde_yaml::Value::as_sequence_mut)
-    else {
+    let Some(clusters) = doc.get_mut("clusters").and_then(serde_yaml::Value::as_sequence_mut) else {
         return;
     };
     for entry in clusters {
@@ -75,14 +69,14 @@ fn rewrite_cluster_entries(doc: &mut serde_yaml::Value, kind_name: &str) {
 fn rewrite_cluster_entry(entry: &mut serde_yaml::Value, kind_name: &str) {
     let url = entry
         .get("cluster")
-        .and_then(|c| c.get("server"))
+        .and_then(|cl| cl.get("server"))
         .and_then(serde_yaml::Value::as_str)
         .map(ToOwned::to_owned);
     let Some(url) = url else {
         return;
     };
     if let Some(rewritten) = rewrite_loopback_url(&url, kind_name)
-        && let Some(server) = entry.get_mut("cluster").and_then(|c| c.get_mut("server"))
+        && let Some(server) = entry.get_mut("cluster").and_then(|cl| cl.get_mut("server"))
     {
         *server = serde_yaml::Value::String(rewritten);
     }
@@ -139,8 +133,7 @@ fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
     std::fs::create_dir_all(dir).map_err(ForgeError::Io)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(KUBECONFIG_DIR_MODE))
-        .map_err(ForgeError::Io)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(KUBECONFIG_DIR_MODE)).map_err(ForgeError::Io)?;
 
     let final_path = dir.join("config");
     let tmp_path = dir.join("config.tmp");
@@ -335,11 +328,7 @@ users:
         export_kubeconfig(&runner, "grid-glb-edge-control", "edge-control", dir.path())
             .unwrap_or_else(|_| std::process::abort());
         let path = dir.path().join("runtime/kubeconfig/edge-control/config");
-        assert!(
-            path.exists(),
-            "kubeconfig file should exist at {}",
-            path.display()
-        );
+        assert!(path.exists(), "kubeconfig file should exist at {}", path.display());
         let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
@@ -368,7 +357,7 @@ users:
 
         let err = match export_kubeconfig(&runner, "test-hub", "hub", dir.path()) {
             Ok(()) => std::process::abort(),
-            Err(e) => e,
+            Err(err) => err,
         };
         let msg = err.to_string();
         assert!(
@@ -389,8 +378,7 @@ users:
                 stderr: String::new(),
             },
         );
-        export_kubeconfig(&runner, "test-hub", "hub", dir.path())
-            .unwrap_or_else(|_| std::process::abort());
+        export_kubeconfig(&runner, "test-hub", "hub", dir.path()).unwrap_or_else(|_| std::process::abort());
         for call in runner.calls() {
             let display = format!("{call}");
             assert!(
@@ -401,10 +389,7 @@ users:
                 !display.contains("client-certificate-data"),
                 "display leaks cert: {display}"
             );
-            assert!(
-                !display.contains("client-key-data"),
-                "display leaks key: {display}"
-            );
+            assert!(!display.contains("client-key-data"), "display leaks key: {display}");
         }
     }
 }

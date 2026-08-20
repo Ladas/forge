@@ -63,12 +63,9 @@ pub fn error(message: &str) -> CommandResult<serde_json::Value> {
 /// # Errors
 ///
 /// Returns [`std::io::Error`] if writing fails.
-pub fn write_json<T: Serialize>(
-    writer: &mut dyn Write,
-    result: &CommandResult<T>,
-) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(result)
-        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_owned());
+pub fn write_json<T: Serialize>(writer: &mut dyn Write, result: &CommandResult<T>) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(result).unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_owned());
     writeln!(writer, "{json}")
 }
 
@@ -96,17 +93,17 @@ mod tests {
             }
         });
         assert_eq!(
-            json.get("apiVersion").and_then(|v| v.as_str()),
+            json.get("apiVersion").and_then(|val| val.as_str()),
             Some(OUTPUT_API_VERSION),
             "apiVersion mismatch"
         );
         assert_eq!(
-            json.get("kind").and_then(|v| v.as_str()),
+            json.get("kind").and_then(|val| val.as_str()),
             Some(OUTPUT_KIND),
             "kind mismatch"
         );
         assert_eq!(
-            json.get("status").and_then(|v| v.as_str()),
+            json.get("status").and_then(|val| val.as_str()),
             Some("Success"),
             "status mismatch"
         );

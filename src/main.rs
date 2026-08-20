@@ -36,7 +36,7 @@ fn dispatch(cli: &Cli, writer: &mut dyn std::io::Write) -> Result<(), ForgeError
                 stack: stack.clone(),
             };
             dispatch_stack(cli, &sub, writer)
-        }
+        },
         Command::Cluster(sub) => dispatch_cluster(cli, sub, writer),
         Command::Service(sub) => dispatch_service(cli, sub, writer),
         Command::Stack(sub) => dispatch_stack(cli, sub, writer),
@@ -44,20 +44,13 @@ fn dispatch(cli: &Cli, writer: &mut dyn std::io::Write) -> Result<(), ForgeError
 }
 
 /// Run the doctor command.
-fn dispatch_doctor(
-    format: &OutputFormat,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_doctor(format: &OutputFormat, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let runner = runner::SystemRunner;
     doctor::run(&runner, format, writer)
 }
 
 /// Run the plan command.
-fn dispatch_plan(
-    cli: &Cli,
-    format: &OutputFormat,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_plan(cli: &Cli, format: &OutputFormat, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     plan::run(&cli.global.config, format, writer)
 }
 
@@ -70,16 +63,10 @@ fn dispatch_config(
 ) -> Result<(), ForgeError> {
     match sub {
         ConfigCommand::Validate => config::run_validate(&cli.global.config, format, writer),
-        ConfigCommand::Show { resolved } => {
-            config::run_show(&cli.global.config, *resolved, format, writer)
-        }
-        ConfigCommand::Init { force } => config::run_init(
-            &cli.global.config,
-            *force,
-            cli.global.dry_run,
-            format,
-            writer,
-        ),
+        ConfigCommand::Show { resolved } => config::run_show(&cli.global.config, *resolved, format, writer),
+        ConfigCommand::Init { force } => {
+            config::run_init(&cli.global.config, *force, cli.global.dry_run, format, writer)
+        },
         ConfigCommand::Schema => config::run_schema(writer),
     }
 }
@@ -95,11 +82,11 @@ fn load_config_validated(cli: &Cli) -> Result<forge::config::ForgeConfig, ForgeE
 }
 
 /// Build a [`ForgeContext`] from CLI options.
-fn build_context<'a>(
-    cli: &'a Cli,
-    runner: &'a dyn runner::CommandRunner,
-    config: &'a forge::config::ForgeConfig,
-) -> ForgeContext<'a> {
+fn build_context<'ctx>(
+    cli: &'ctx Cli,
+    runner: &'ctx dyn runner::CommandRunner,
+    config: &'ctx forge::config::ForgeConfig,
+) -> ForgeContext<'ctx> {
     ForgeContext {
         runner,
         config,
@@ -115,10 +102,9 @@ fn build_context<'a>(
 /// Canonicalizes the result so that Docker volume bind-mounts
 /// receive absolute paths instead of relative ones.
 fn config_dir_from_path(path: &std::path::Path) -> std::path::PathBuf {
-    let parent = path.parent().map_or_else(
-        || std::path::PathBuf::from("."),
-        std::path::Path::to_path_buf,
-    );
+    let parent = path
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
     std::fs::canonicalize(&parent).unwrap_or(parent)
 }
 
@@ -131,11 +117,7 @@ fn dispatch_up(cli: &Cli, writer: &mut dyn std::io::Write) -> Result<(), ForgeEr
 }
 
 /// Dispatch the `down` command.
-fn dispatch_down(
-    cli: &Cli,
-    force: bool,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_down(cli: &Cli, force: bool, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config);
@@ -143,11 +125,7 @@ fn dispatch_down(
 }
 
 /// Dispatch the `status` command.
-fn dispatch_status(
-    cli: &Cli,
-    json_flag: bool,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_status(cli: &Cli, json_flag: bool, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let mut ctx = build_context(cli, &runner, &config);
@@ -158,11 +136,7 @@ fn dispatch_status(
 }
 
 /// Dispatch service subcommands.
-fn dispatch_service(
-    cli: &Cli,
-    sub: &ServiceCommand,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_service(cli: &Cli, sub: &ServiceCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config);
@@ -170,11 +144,7 @@ fn dispatch_service(
 }
 
 /// Dispatch stack subcommands.
-fn dispatch_stack(
-    cli: &Cli,
-    sub: &StackCommand,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_stack(cli: &Cli, sub: &StackCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config);
@@ -182,11 +152,7 @@ fn dispatch_stack(
 }
 
 /// Dispatch cluster subcommands.
-fn dispatch_cluster(
-    cli: &Cli,
-    sub: &ClusterCommand,
-    writer: &mut dyn std::io::Write,
-) -> Result<(), ForgeError> {
+fn dispatch_cluster(cli: &Cli, sub: &ClusterCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config);
@@ -195,10 +161,10 @@ fn dispatch_cluster(
 
 /// Handle the result of command dispatch.
 fn handle_result(result: Result<(), ForgeError>, format: &OutputFormat) -> std::process::ExitCode {
-    let Err(e) = result else {
+    let Err(err) = result else {
         return std::process::ExitCode::SUCCESS;
     };
-    report_error(&e, format);
+    report_error(&err, format);
     std::process::ExitCode::FAILURE
 }
 
@@ -213,16 +179,16 @@ fn error_format(cli: &Cli) -> OutputFormat {
 
 /// Print an error to stderr in the appropriate format.
 #[expect(clippy::print_stderr, reason = "CLI error reporting")]
-fn report_error(e: &ForgeError, format: &OutputFormat) {
+fn report_error(err: &ForgeError, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
-            let envelope = output::error(&e.to_string());
+            let envelope = output::error(&err.to_string());
             let json = serde_json::to_string_pretty(&envelope)
                 .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_owned());
             eprintln!("{json}");
-        }
+        },
         OutputFormat::Text => {
-            eprintln!("error: {e}");
-        }
+            eprintln!("error: {err}");
+        },
     }
 }

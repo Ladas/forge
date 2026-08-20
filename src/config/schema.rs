@@ -23,9 +23,7 @@ mod tests {
             }
         });
         assert!(
-            obj.contains_key("$schema")
-                || obj.contains_key("properties")
-                || obj.contains_key("type"),
+            obj.contains_key("$schema") || obj.contains_key("properties") || obj.contains_key("type"),
             "schema should contain standard JSON Schema fields"
         );
     }

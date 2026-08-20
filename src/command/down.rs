@@ -31,7 +31,7 @@ pub fn run(ctx: &ForgeContext<'_>, _force: bool, writer: &mut dyn Write) -> Resu
     if !ctx.dry_run {
         state::save(&ctx.state_dir, &st)?;
     }
-    render_all(writer, &svc_results, &results, &net_result, &ctx.format)
+    render_all(writer, &svc_results, &results, net_result.as_ref(), &ctx.format)
 }
 
 // ---------------------------------------------------------------
@@ -49,15 +49,12 @@ struct DeleteResult {
 }
 
 /// Delete clusters in reverse order from state.
-fn delete_clusters(
-    ctx: &ForgeContext<'_>,
-    state: &mut state::ForgeState,
-) -> Result<Vec<DeleteResult>, ForgeError> {
+fn delete_clusters(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Result<Vec<DeleteResult>, ForgeError> {
     let targets = collect_targets(state);
     let mut results = Vec::new();
     for (name, kind_name) in targets.into_iter().rev() {
-        let r = delete_one(ctx, state, &name, &kind_name)?;
-        results.push(r);
+        let result = delete_one(ctx, state, &name, &kind_name)?;
+        results.push(result);
     }
     Ok(results)
 }
@@ -67,8 +64,8 @@ fn collect_targets(state: &state::ForgeState) -> Vec<(String, String)> {
     state
         .clusters
         .iter()
-        .filter(|c| c.phase != ClusterPhase::Gone)
-        .map(|c| (c.name.clone(), c.kind_name.clone()))
+        .filter(|cluster| cluster.phase != ClusterPhase::Gone)
+        .map(|cluster| (cluster.name.clone(), cluster.kind_name.clone()))
         .collect()
 }
 
@@ -117,10 +114,7 @@ struct SvcDeleteResult {
 }
 
 /// Stop services in reverse dependency order.
-fn stop_services(
-    ctx: &ForgeContext<'_>,
-    state: &mut state::ForgeState,
-) -> Result<Vec<SvcDeleteResult>, ForgeError> {
+fn stop_services(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Result<Vec<SvcDeleteResult>, ForgeError> {
     if ctx.config.spec.services.is_empty() {
         return Ok(Vec::new());
     }
@@ -129,8 +123,8 @@ fn stop_services(
     order.reverse();
     let mut results = Vec::new();
     for idx in order {
-        let r = stop_one_svc(ctx, state, &binary, idx)?;
-        results.push(r);
+        let result = stop_one_svc(ctx, state, &binary, idx)?;
+        results.push(result);
     }
     Ok(results)
 }
@@ -252,7 +246,7 @@ fn render_all(
     writer: &mut dyn Write,
     services: &[SvcDeleteResult],
     clusters: &[DeleteResult],
-    net: &Option<NetworkTeardown>,
+    net: Option<&NetworkTeardown>,
     format: &OutputFormat,
 ) -> Result<(), ForgeError> {
     match format {
@@ -266,7 +260,7 @@ fn render_json(
     writer: &mut dyn Write,
     services: &[SvcDeleteResult],
     clusters: &[DeleteResult],
-    net: &Option<NetworkTeardown>,
+    net: Option<&NetworkTeardown>,
 ) -> Result<(), ForgeError> {
     let items: Vec<_> = clusters.iter().map(result_to_json).collect();
     let mut data = serde_json::json!({ "clusters": items });
@@ -274,10 +268,10 @@ fn render_json(
         let svc_items: Vec<_> = services.iter().map(svc_result_to_json).collect();
         obj.insert("services".to_owned(), serde_json::json!(svc_items));
     }
-    if let (Some(n), Some(obj)) = (net, data.as_object_mut()) {
+    if let (Some(nd), Some(obj)) = (net, data.as_object_mut()) {
         obj.insert(
             "network".to_owned(),
-            serde_json::json!({ "name": n.name, "dryRun": n.dry_run }),
+            serde_json::json!({ "name": nd.name, "dryRun": nd.dry_run }),
         );
     }
     let envelope = output::success(data);
@@ -286,20 +280,20 @@ fn render_json(
 }
 
 /// Convert one service teardown result to JSON.
-fn svc_result_to_json(r: &SvcDeleteResult) -> serde_json::Value {
+fn svc_result_to_json(result: &SvcDeleteResult) -> serde_json::Value {
     serde_json::json!({
-        "name": r.name,
-        "containerName": r.container_name,
-        "dryRun": r.dry_run,
+        "name": result.name,
+        "containerName": result.container_name,
+        "dryRun": result.dry_run,
     })
 }
 
 /// Convert one result to JSON.
-fn result_to_json(r: &DeleteResult) -> serde_json::Value {
+fn result_to_json(result: &DeleteResult) -> serde_json::Value {
     serde_json::json!({
-        "name": r.name,
-        "kindName": r.kind_name,
-        "dryRun": r.dry_run,
+        "name": result.name,
+        "kindName": result.kind_name,
+        "dryRun": result.dry_run,
     })
 }
 
@@ -308,51 +302,45 @@ fn render_text(
     writer: &mut dyn Write,
     services: &[SvcDeleteResult],
     clusters: &[DeleteResult],
-    net: &Option<NetworkTeardown>,
+    net: Option<&NetworkTeardown>,
 ) -> Result<(), ForgeError> {
-    for s in services {
-        output::write_text(writer, &format_svc_text(s))?;
+    for svc in services {
+        output::write_text(writer, &format_svc_text(svc))?;
     }
-    for r in clusters {
-        output::write_text(writer, &format_result_text(r))?;
+    for result in clusters {
+        output::write_text(writer, &format_result_text(result))?;
     }
-    if let Some(n) = net {
-        output::write_text(writer, &format_net_text(n))?;
+    if let Some(net) = net {
+        output::write_text(writer, &format_net_text(net))?;
     }
     Ok(())
 }
 
 /// Format a service teardown result as a text line.
-fn format_svc_text(s: &SvcDeleteResult) -> String {
-    if s.dry_run {
-        return format!(
-            "would stop service '{}' (container: {})",
-            s.name, s.container_name
-        );
+fn format_svc_text(svc: &SvcDeleteResult) -> String {
+    if svc.dry_run {
+        return format!("would stop service '{}' (container: {})", svc.name, svc.container_name);
     }
-    format!(
-        "stopped service '{}' (container: {})",
-        s.name, s.container_name
-    )
+    format!("stopped service '{}' (container: {})", svc.name, svc.container_name)
 }
 
 /// Format a network teardown result as a text line.
-fn format_net_text(n: &NetworkTeardown) -> String {
-    if n.dry_run {
-        return format!("would remove network '{}'", n.name);
+fn format_net_text(net: &NetworkTeardown) -> String {
+    if net.dry_run {
+        return format!("would remove network '{}'", net.name);
     }
-    format!("removed network '{}'", n.name)
+    format!("removed network '{}'", net.name)
 }
 
 /// Format a single result as text.
-fn format_result_text(r: &DeleteResult) -> String {
-    if r.dry_run {
+fn format_result_text(result: &DeleteResult) -> String {
+    if result.dry_run {
         return format!(
             "would delete cluster '{}' (kind name: {})",
-            r.name, r.kind_name
+            result.name, result.kind_name
         );
     }
-    format!("deleted cluster '{}' (kind name: {})", r.name, r.kind_name)
+    format!("deleted cluster '{}' (kind name: {})", result.name, result.kind_name)
 }
 
 #[cfg(test)]
@@ -435,10 +423,7 @@ spec:
         };
         let mut buf = Vec::new();
         run(&ctx, false, &mut buf).unwrap_or_else(|_| std::process::abort());
-        assert!(
-            runner.was_called("kind delete cluster"),
-            "should call kind delete"
-        );
+        assert!(runner.was_called("kind delete cluster"), "should call kind delete");
         let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("deleted"), "should say deleted: {text}");
     }
@@ -459,15 +444,9 @@ spec:
         };
         let mut buf = Vec::new();
         run(&ctx, false, &mut buf).unwrap_or_else(|_| std::process::abort());
-        assert!(
-            !runner.was_called("kind delete"),
-            "dry-run should not call kind delete"
-        );
+        assert!(!runner.was_called("kind delete"), "dry-run should not call kind delete");
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("would delete"),
-            "should say would delete: {text}"
-        );
+        assert!(text.contains("would delete"), "should say would delete: {text}");
     }
 
     /// Pre-populate state with a running cluster and active network.
@@ -510,15 +489,9 @@ spec:
     /// Assert that removing a network invalidates its address allocations.
     fn assert_network_allocation_cleared(state_dir: &std::path::Path) {
         let state = state::load(state_dir).unwrap_or_else(|_| std::process::abort());
-        let network = state
-            .network
-            .as_ref()
-            .unwrap_or_else(|| std::process::abort());
+        let network = state.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(network.phase, NetworkPhase::Gone);
-        assert!(
-            network.cidr.is_none(),
-            "removed network must not retain its CIDR"
-        );
+        assert!(network.cidr.is_none(), "removed network must not retain its CIDR");
         assert!(
             network.cluster_pools.is_empty(),
             "removed network must not retain MetalLB pools"
@@ -551,10 +524,7 @@ spec:
         assert!(runner.was_called("network rm"), "should remove network");
         assert_network_allocation_cleared(dir.path());
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("removed network"),
-            "should report removal: {text}"
-        );
+        assert!(text.contains("removed network"), "should report removal: {text}");
     }
 
     #[test]
@@ -573,10 +543,7 @@ spec:
         };
         let mut buf = Vec::new();
         run(&ctx, false, &mut buf).unwrap_or_else(|_| std::process::abort());
-        assert!(
-            !runner.was_called("network rm"),
-            "dry-run should not remove network"
-        );
+        assert!(!runner.was_called("network rm"), "dry-run should not remove network");
         let text = String::from_utf8_lossy(&buf);
         assert!(
             text.contains("would remove network"),

@@ -18,22 +18,14 @@ use crate::{
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn run_validate(
-    config_path: &Path,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn run_validate(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let cfg = config::load(config_path)?;
     validate::validate(&cfg)?;
     report_valid(config_path, format, writer)
 }
 
 /// Report that validation passed.
-fn report_valid(
-    config_path: &Path,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn report_valid(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => {
             let msg = format!("{}: valid", config_path.display());
@@ -42,10 +34,10 @@ fn report_valid(
                 "message": msg,
             }));
             output::write_json(writer, &result)?;
-        }
+        },
         OutputFormat::Text => {
             output::write_text(writer, &format!("{}: valid", config_path.display()))?;
-        }
+        },
     }
     Ok(())
 }
@@ -73,27 +65,23 @@ fn emit_resolved_note(format: &OutputFormat, writer: &mut dyn Write) -> Result<(
     let msg = "note: template expansion is not implemented; \
                --resolved output is identical to parsed config";
     match format {
-        OutputFormat::Json => {}
+        OutputFormat::Json => {},
         OutputFormat::Text => output::write_text(writer, msg)?,
     }
     Ok(())
 }
 
 /// Emit the parsed config.
-fn emit_config(
-    cfg: &config::ForgeConfig,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn emit_config(cfg: &config::ForgeConfig, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => {
             let result = output::success(cfg);
             output::write_json(writer, &result)?;
-        }
+        },
         OutputFormat::Text => {
             let yaml = serde_yaml::to_string(cfg)?;
             output::write_text(writer, &yaml)?;
-        }
+        },
     }
     Ok(())
 }
@@ -124,11 +112,7 @@ pub fn run_init(
 }
 
 /// Report what `init` would write in dry-run mode.
-fn report_init_dry_run(
-    config_path: &Path,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn report_init_dry_run(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let msg = format!("would write {}", config_path.display());
     match format {
         OutputFormat::Json => {
@@ -137,18 +121,14 @@ fn report_init_dry_run(
                 "dryRun": true,
             }));
             output::write_json(writer, &result)?;
-        }
+        },
         OutputFormat::Text => output::write_text(writer, &msg)?,
     }
     Ok(())
 }
 
 /// Report that init succeeded.
-fn report_init_success(
-    config_path: &Path,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn report_init_success(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let msg = format!("wrote {}", config_path.display());
     match format {
         OutputFormat::Json => {
@@ -156,7 +136,7 @@ fn report_init_success(
                 "path": config_path.display().to_string(),
             }));
             output::write_json(writer, &result)?;
-        }
+        },
         OutputFormat::Text => output::write_text(writer, &msg)?,
     }
     Ok(())
@@ -169,8 +149,7 @@ fn report_init_success(
 /// Returns [`ForgeError`] if the operation fails.
 pub fn run_schema(writer: &mut dyn Write) -> Result<(), ForgeError> {
     let schema = config::schema::generate();
-    let json =
-        serde_json::to_string_pretty(&schema).map_err(|e| ForgeError::Config(e.to_string()))?;
+    let json = serde_json::to_string_pretty(&schema).map_err(|err| ForgeError::Config(err.to_string()))?;
     output::write_text(writer, &json)?;
     Ok(())
 }
@@ -190,8 +169,7 @@ mod tests {
         });
         let path = dir.path().join("forge.yaml");
         let mut buf = Vec::new();
-        run_init(&path, false, false, &OutputFormat::Text, &mut buf)
-            .unwrap_or_else(|_| std::process::abort());
+        run_init(&path, false, false, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         assert!(path.exists(), "forge.yaml should be created");
     }
 
@@ -211,10 +189,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("already exists"),
-            "expected overwrite error, got: {msg}"
-        );
+        assert!(msg.contains("already exists"), "expected overwrite error, got: {msg}");
     }
 
     #[test]
@@ -229,8 +204,7 @@ mod tests {
         let path = dir.path().join("forge.yaml");
         std::fs::write(&path, "old").unwrap_or_else(|_| std::process::abort());
         let mut buf = Vec::new();
-        run_init(&path, true, false, &OutputFormat::Text, &mut buf)
-            .unwrap_or_else(|_| std::process::abort());
+        run_init(&path, true, false, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
@@ -238,10 +212,7 @@ mod tests {
                 String::new()
             }
         });
-        assert!(
-            content.contains("forge.praxis.dev"),
-            "should contain new content"
-        );
+        assert!(content.contains("forge.praxis.dev"), "should contain new content");
     }
 
     #[test]
@@ -255,14 +226,10 @@ mod tests {
         });
         let path = dir.path().join("forge.yaml");
         let mut buf = Vec::new();
-        run_init(&path, false, true, &OutputFormat::Text, &mut buf)
-            .unwrap_or_else(|_| std::process::abort());
+        run_init(&path, false, true, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         assert!(!path.exists(), "dry-run must not create forge.yaml");
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("would write"),
-            "expected dry-run output: {text}"
-        );
+        assert!(text.contains("would write"), "expected dry-run output: {text}");
     }
 
     #[test]

@@ -5,10 +5,7 @@
 //! - `.forge` state paths are deterministic and relative to `--state-dir`;
 //! - no Grid checkout or specific working directory is required.
 
-#![allow(
-    clippy::tests_outside_test_module,
-    reason = "integration tests live in tests/"
-)]
+#![allow(clippy::tests_outside_test_module, reason = "integration tests live in tests/")]
 
 use std::path::Path;
 
@@ -19,11 +16,7 @@ use std::path::Path;
 /// Resolve the praxis-forge binary built by this workspace.
 fn forge_binary() -> std::path::PathBuf {
     let bin = Path::new(env!("CARGO_BIN_EXE_praxis-forge"));
-    assert!(
-        bin.exists(),
-        "praxis-forge binary not found at {}",
-        bin.display()
-    );
+    assert!(bin.exists(), "praxis-forge binary not found at {}", bin.display());
     bin.to_path_buf()
 }
 
@@ -157,8 +150,7 @@ fn state_dir_flag_is_deterministic() {
     let empty_dir = dir.path().join("empty-state");
     let seeded_dir = dir.path().join("seeded-state");
     std::fs::create_dir_all(&seeded_dir).unwrap_or_else(|_| std::process::abort());
-    std::fs::write(seeded_dir.join("state.json"), SEEDED_STATE)
-        .unwrap_or_else(|_| std::process::abort());
+    std::fs::write(seeded_dir.join("state.json"), SEEDED_STATE).unwrap_or_else(|_| std::process::abort());
 
     // Path independence: the same state dir must give the same answer from any
     // working directory.
@@ -225,7 +217,7 @@ fn kind_usable() -> bool {
         .arg("get")
         .arg("clusters")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|output| output.status.success())
 }
 
 #[test]
@@ -265,8 +257,7 @@ fn config_init_dry_run_from_foreign_directory() {
 fn invalid_config_returns_nonzero_exit_code() {
     let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
     let bad_config = dir.path().join("bad.yaml");
-    std::fs::write(&bad_config, "apiVersion: wrong/v1\nkind: Wrong\n")
-        .unwrap_or_else(|_| std::process::abort());
+    std::fs::write(&bad_config, "apiVersion: wrong/v1\nkind: Wrong\n").unwrap_or_else(|_| std::process::abort());
     let output = std::process::Command::new(forge_binary())
         .arg("--config")
         .arg(&bad_config)

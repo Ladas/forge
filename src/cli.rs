@@ -24,12 +24,7 @@ pub struct Cli {
 #[derive(Debug, Parser)]
 pub struct GlobalOptions {
     /// Path to the Forge configuration file.
-    #[arg(
-        long,
-        env = "FORGE_CONFIG",
-        default_value = "forge.yaml",
-        global = true
-    )]
+    #[arg(long, env = "FORGE_CONFIG", default_value = "forge.yaml", global = true)]
     pub config: PathBuf,
 
     /// Directory for Forge state files.
@@ -235,9 +230,7 @@ impl std::str::FromStr for OutputFormat {
         match s {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
-            other => Err(format!(
-                "unknown output format {other:?} (expected text or json)"
-            )),
+            other => Err(format!("unknown output format {other:?} (expected text or json)")),
         }
     }
 }
@@ -260,9 +253,7 @@ impl std::str::FromStr for RuntimeProvider {
             "auto" => Ok(Self::Auto),
             "docker" => Ok(Self::Docker),
             "podman" => Ok(Self::Podman),
-            other => Err(format!(
-                "unknown runtime {other:?} (expected auto, docker, or podman)"
-            )),
+            other => Err(format!("unknown runtime {other:?} (expected auto, docker, or podman)")),
         }
     }
 }

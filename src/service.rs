@@ -42,17 +42,17 @@ pub fn container_name(env_name: &str, service_name: &str) -> String {
 ///
 /// Groups common arguments to keep public function signatures
 /// under the five-argument limit.
-pub struct ServiceParams<'a> {
+pub struct ServiceParams<'svc> {
     /// Container runtime binary name (e.g. `"docker"`).
-    pub binary: &'a str,
+    pub binary: &'svc str,
     /// Deterministic container name.
-    pub container_name: &'a str,
+    pub container_name: &'svc str,
     /// Environment name from configuration metadata.
-    pub env_name: &'a str,
+    pub env_name: &'svc str,
     /// Directory containing the configuration file.
-    pub config_dir: &'a Path,
+    pub config_dir: &'svc Path,
     /// Forge state directory (for resolving `.forge/` volume sources).
-    pub state_dir: &'a Path,
+    pub state_dir: &'svc Path,
 }
 
 // -------------------------------------------------------------
@@ -124,12 +124,7 @@ pub fn start_service(
     service: &ServiceSpec,
 ) -> Result<(), ForgeError> {
     if container_exists(runner, params.binary, params.container_name)? {
-        verify_ownership(
-            runner,
-            params.binary,
-            params.container_name,
-            params.env_name,
-        )?;
+        verify_ownership(runner, params.binary, params.container_name, params.env_name)?;
         let stop = stop_spec(params.binary, params.container_name);
         check_success(&runner.run(&stop)?, "stop")?;
         let rm = rm_spec(params.binary, params.container_name);
@@ -154,19 +149,11 @@ pub fn start_service(
 ///
 /// Returns [`ForgeError`] if the container exists but is not owned
 /// by this environment, or if any runtime command fails.
-pub fn stop_service(
-    runner: &dyn CommandRunner,
-    params: &ServiceParams<'_>,
-) -> Result<(), ForgeError> {
+pub fn stop_service(runner: &dyn CommandRunner, params: &ServiceParams<'_>) -> Result<(), ForgeError> {
     if !container_exists(runner, params.binary, params.container_name)? {
         return Ok(());
     }
-    verify_ownership(
-        runner,
-        params.binary,
-        params.container_name,
-        params.env_name,
-    )?;
+    verify_ownership(runner, params.binary, params.container_name, params.env_name)?;
     let stop = stop_spec(params.binary, params.container_name);
     check_success(&runner.run(&stop)?, "stop")?;
     let rm = rm_spec(params.binary, params.container_name);
@@ -178,11 +165,7 @@ pub fn stop_service(
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the runtime binary cannot execute.
-pub fn container_exists(
-    runner: &dyn CommandRunner,
-    binary: &str,
-    name: &str,
-) -> Result<bool, ForgeError> {
+pub fn container_exists(runner: &dyn CommandRunner, binary: &str, name: &str) -> Result<bool, ForgeError> {
     let spec = inspect_spec(binary, name);
     let output = runner.run(&spec)?;
     Ok(output.status == 0)
@@ -215,66 +198,63 @@ fn build_name_index(services: &[ServiceSpec]) -> BTreeMap<&str, usize> {
     services
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.name.as_str(), i))
+        .map(|(idx, svc)| (svc.name.as_str(), idx))
         .collect()
 }
 
 /// Build adjacency list and in-degree vector from service deps.
-fn build_dep_graph(
-    services: &[ServiceSpec],
-    index: &BTreeMap<&str, usize>,
-) -> Result<DepGraph, ForgeError> {
-    let n = services.len();
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut in_deg: Vec<usize> = vec![0; n];
-    for (i, svc) in services.iter().enumerate() {
+fn build_dep_graph(services: &[ServiceSpec], index: &BTreeMap<&str, usize>) -> Result<DepGraph, ForgeError> {
+    let count = services.len();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut in_deg: Vec<usize> = vec![0; count];
+    for (idx, svc) in services.iter().enumerate() {
         for dep in &svc.depends_on {
-            let &j = index.get(dep.as_str()).ok_or_else(|| {
-                ForgeError::Config(format!("service '{}' depends on unknown '{dep}'", svc.name))
-            })?;
+            let &dep_idx = index
+                .get(dep.as_str())
+                .ok_or_else(|| ForgeError::Config(format!("service '{}' depends on unknown '{dep}'", svc.name)))?;
             let neighbours = adj
-                .get_mut(j)
+                .get_mut(dep_idx)
                 .ok_or_else(|| ForgeError::State("graph index out of bounds".to_owned()))?;
-            neighbours.push(i);
+            neighbours.push(idx);
             let deg = in_deg
-                .get_mut(i)
+                .get_mut(idx)
                 .ok_or_else(|| ForgeError::State("graph index out of bounds".to_owned()))?;
-            *deg += 1;
+            *deg = deg
+                .checked_add(1)
+                .ok_or_else(|| ForgeError::State("in-degree overflow".to_owned()))?;
         }
     }
     Ok((adj, in_deg))
 }
 
 /// Run Kahn's algorithm on the adjacency list.
-fn toposort(adj: &[Vec<usize>], in_deg: &mut [usize], n: usize) -> Result<Vec<usize>, ForgeError> {
+fn toposort(adj: &[Vec<usize>], in_deg: &mut [usize], count: usize) -> Result<Vec<usize>, ForgeError> {
     let mut queue: VecDeque<usize> = in_deg
         .iter()
         .enumerate()
-        .filter(|(_, d)| **d == 0)
-        .map(|(i, _)| i)
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(idx, _)| idx)
         .collect();
-    let mut order = Vec::with_capacity(n);
-    while let Some(u) = queue.pop_front() {
-        order.push(u);
+    let mut order = Vec::with_capacity(count);
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
         let neighbours = adj
-            .get(u)
+            .get(node)
             .ok_or_else(|| ForgeError::State("toposort index error".to_owned()))?;
-        for &v in neighbours {
+        for &nbr in neighbours {
             let deg = in_deg
-                .get_mut(v)
+                .get_mut(nbr)
                 .ok_or_else(|| ForgeError::State("toposort index error".to_owned()))?;
             *deg = deg.saturating_sub(1);
             if *deg == 0 {
-                queue.push_back(v);
+                queue.push_back(nbr);
             }
         }
     }
-    if order.len() == n {
+    if order.len() == count {
         Ok(order)
     } else {
-        Err(ForgeError::Config(
-            "cycle in service dependencies".to_owned(),
-        ))
+        Err(ForgeError::Config("cycle in service dependencies".to_owned()))
     }
 }
 
@@ -283,12 +263,7 @@ fn toposort(adj: &[Vec<usize>], in_deg: &mut [usize], n: usize) -> Result<Vec<us
 // -------------------------------------------------------------
 
 /// Verify that an existing container is owned by this environment.
-fn verify_ownership(
-    runner: &dyn CommandRunner,
-    binary: &str,
-    name: &str,
-    env_name: &str,
-) -> Result<(), ForgeError> {
+fn verify_ownership(runner: &dyn CommandRunner, binary: &str, name: &str, env_name: &str) -> Result<(), ForgeError> {
     let labels = inspect_labels(runner, binary, name)?;
     check_label(&labels, "forge.managed", "true", name)?;
     check_label(&labels, "forge.environment", env_name, name)
@@ -307,24 +282,17 @@ fn inspect_labels(
 }
 
 /// Verify a single label value matches the expected value.
-fn check_label(
-    labels: &BTreeMap<String, String>,
-    key: &str,
-    expected: &str,
-    name: &str,
-) -> Result<(), ForgeError> {
+fn check_label(labels: &BTreeMap<String, String>, key: &str, expected: &str, name: &str) -> Result<(), ForgeError> {
     match labels.get(key) {
-        Some(v) if v == expected => Ok(()),
-        Some(v) => Err(ownership_mismatch(name, key, expected, v)),
+        Some(val) if val == expected => Ok(()),
+        Some(val) => Err(ownership_mismatch(name, key, expected, val)),
         None => Err(missing_label(name, key)),
     }
 }
 
 /// Build an error for a mismatched ownership label.
 fn ownership_mismatch(name: &str, key: &str, expected: &str, actual: &str) -> ForgeError {
-    ForgeError::State(format!(
-        "container '{name}' has {key}={actual}, expected {expected}"
-    ))
+    ForgeError::State(format!("container '{name}' has {key}={actual}, expected {expected}"))
 }
 
 /// Build an error for a missing ownership label.
@@ -344,12 +312,7 @@ fn run_spec(params: &ServiceParams<'_>, service: &ServiceSpec) -> Result<Command
     let mut redact = Vec::new();
     append_network_args(&mut args, &service.network, params.env_name);
     append_port_args(&mut args, &service.ports);
-    append_volume_args(
-        &mut args,
-        &service.volumes,
-        params.config_dir,
-        params.state_dir,
-    )?;
+    append_volume_args(&mut args, &service.volumes, params.config_dir, params.state_dir)?;
     append_host_group_arg(&mut args, service.inherit_host_group, params.state_dir)?;
     append_env_args(&mut args, &mut redact, &service.env);
     append_restart_arg(&mut args, &service.restart);
@@ -379,12 +342,12 @@ fn append_network_args(args: &mut Vec<OsString>, network: &NetworkMode, env_name
         NetworkMode::Environment => {
             args.push("--network".into());
             args.push(format!("{env_name}-net").into());
-        }
+        },
         NetworkMode::Host => {
             args.push("--network".into());
             args.push("host".into());
-        }
-        NetworkMode::None => {}
+        },
+        NetworkMode::None => {},
     }
 }
 
@@ -416,11 +379,7 @@ fn append_volume_args(
 }
 
 /// Add the invoking host group without replacing the image's configured user.
-fn append_host_group_arg(
-    args: &mut Vec<OsString>,
-    enabled: bool,
-    state_dir: &Path,
-) -> Result<(), ForgeError> {
+fn append_host_group_arg(args: &mut Vec<OsString>, enabled: bool, state_dir: &Path) -> Result<(), ForgeError> {
     if !enabled {
         return Ok(());
     }
@@ -445,11 +404,7 @@ fn append_host_group_arg(
 }
 
 /// Append `-e` environment variable arguments.
-fn append_env_args(
-    args: &mut Vec<OsString>,
-    redact: &mut Vec<Redaction>,
-    env: &BTreeMap<String, String>,
-) {
+fn append_env_args(args: &mut Vec<OsString>, redact: &mut Vec<Redaction>, env: &BTreeMap<String, String>) {
     for (key, val) in env {
         let arg = OsString::from(format!("{key}={val}"));
         args.push("-e".into());
@@ -475,8 +430,8 @@ fn append_restart_arg(args: &mut Vec<OsString>, restart: &RestartPolicy) {
 fn append_image_and_cmd(args: &mut Vec<OsString>, image: &str, cmd_args: &[String]) {
     args.push("--".into());
     args.push(image.into());
-    for a in cmd_args {
-        args.push(a.into());
+    for arg in cmd_args {
+        args.push(arg.into());
     }
 }
 
@@ -538,11 +493,7 @@ fn build_spec(binary: &str, args: Vec<OsString>) -> CommandSpec {
 }
 
 /// Construct a [`CommandSpec`] from a binary, arguments, and redactions.
-fn build_spec_with_redactions(
-    binary: &str,
-    args: Vec<OsString>,
-    redact: Vec<Redaction>,
-) -> CommandSpec {
+fn build_spec_with_redactions(binary: &str, args: Vec<OsString>, redact: Vec<Redaction>) -> CommandSpec {
     CommandSpec {
         program: binary.into(),
         args,
@@ -581,11 +532,7 @@ fn format_port_mapping(port: &PortMapping) -> String {
 ///
 /// Returns [`ForgeError::Validation`] if the source escapes its base
 /// directory.
-fn format_volume_arg(
-    vol: &VolumeMount,
-    config_dir: &Path,
-    state_dir: &Path,
-) -> Result<String, ForgeError> {
+fn format_volume_arg(vol: &VolumeMount, config_dir: &Path, state_dir: &Path) -> Result<String, ForgeError> {
     let source = resolve_source(&vol.source, config_dir, state_dir)?;
     let base = format!("{}:{}", source.display(), vol.target);
     if vol.read_only {
@@ -615,19 +562,14 @@ const RUNTIME_DIR_PREFIX: &str = ".forge/runtime/";
 /// inspects the source string, so a symlink committed alongside
 /// `forge.yaml` would otherwise hand the container runtime a bind mount
 /// of any host path the symlink points at.
-fn resolve_source(
-    source: &str,
-    config_dir: &Path,
-    state_dir: &Path,
-) -> Result<std::path::PathBuf, ForgeError> {
+fn resolve_source(source: &str, config_dir: &Path, state_dir: &Path) -> Result<std::path::PathBuf, ForgeError> {
     let path = Path::new(source);
     if path.is_absolute() {
         return Ok(path.to_path_buf());
     }
     if let Some(suffix) = source.strip_prefix(STATE_DIR_PREFIX) {
         let canonical = std::fs::canonicalize(state_dir).unwrap_or_else(|_| {
-            std::env::current_dir()
-                .map_or_else(|_| state_dir.to_path_buf(), |cwd| cwd.join(state_dir))
+            std::env::current_dir().map_or_else(|_| state_dir.to_path_buf(), |cwd| cwd.join(state_dir))
         });
         return ensure_contained(&canonical, &canonical.join(suffix), source);
     }
@@ -639,18 +581,14 @@ fn resolve_source(
 /// Returns the symlink-free form of `candidate` so callers hand the
 /// container runtime the same path this check approved, closing the gap
 /// between the check and the mount.
-fn ensure_contained(
-    base: &Path,
-    candidate: &Path,
-    source: &str,
-) -> Result<std::path::PathBuf, ForgeError> {
+fn ensure_contained(base: &Path, candidate: &Path, source: &str) -> Result<std::path::PathBuf, ForgeError> {
     let root = resolve_existing_ancestor(base)
-        .map_err(|e| ForgeError::Validation(format!("volume source {source:?}: {e}")))?;
+        .map_err(|err| ForgeError::Validation(format!("volume source {source:?}: {err}")))?;
     let resolved = resolve_existing_ancestor(candidate)
-        .map_err(|e| ForgeError::Validation(format!("volume source {source:?}: {e}")))?;
+        .map_err(|err| ForgeError::Validation(format!("volume source {source:?}: {err}")))?;
     let has_parent_component = resolved
         .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir));
+        .any(|comp| matches!(comp, std::path::Component::ParentDir));
     if has_parent_component || !resolved.starts_with(&root) {
         return Err(ForgeError::Validation(format!(
             "volume source {source:?} escapes the project directory: it resolves to {} outside {}",
@@ -679,30 +617,27 @@ fn resolve_existing_ancestor(path: &Path) -> Result<std::path::PathBuf, String> 
                 let mut resolved = canonical;
                 resolved.extend(tail.iter().rev());
                 return Ok(resolved);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 // An absent component is fine: a runtime directory may be created
                 // later. A component that exists as a symlink yet still fails to
                 // canonicalize is dangling, and treating it as absent would return
                 // the unresolved link for the runtime to follow out of the base.
                 if std::fs::symlink_metadata(cursor).is_ok() {
-                    return Err(format!(
-                        "{} is a symlink that does not resolve",
-                        cursor.display()
-                    ));
+                    return Err(format!("{} is a symlink that does not resolve", cursor.display()));
                 }
-            }
-            Err(e) => {
+            },
+            Err(err) => {
                 // Anything else — a symlink loop, an unreadable parent — leaves the
                 // real target unknown, so it cannot be approved.
-                return Err(format!("cannot resolve {}: {e}", cursor.display()));
-            }
+                return Err(format!("cannot resolve {}: {err}", cursor.display()));
+            },
         }
         match (cursor.parent(), cursor.file_name()) {
             (Some(parent), Some(name)) => {
                 tail.push(name);
                 cursor = parent;
-            }
+            },
             _ => return Ok(path.to_path_buf()),
         }
     }
@@ -739,8 +674,7 @@ fn parse_labels(stdout: &str) -> Result<BTreeMap<String, String>, ForgeError> {
     if trimmed.is_empty() {
         return Ok(BTreeMap::new());
     }
-    serde_json::from_str(trimmed)
-        .map_err(|e| ForgeError::State(format!("cannot parse container labels: {e}")))
+    serde_json::from_str(trimmed).map_err(|err| ForgeError::State(format!("cannot parse container labels: {err}")))
 }
 
 /// Parsed identity fields from `docker inspect --format` output.
@@ -759,7 +693,7 @@ struct InspectOutput {
 fn parse_identity(stdout: &str) -> Result<ServiceIdentity, ForgeError> {
     let trimmed = stdout.trim();
     let parsed: InspectOutput = serde_json::from_str(trimmed)
-        .map_err(|e| ForgeError::State(format!("cannot parse service inspect: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("cannot parse service inspect: {err}")))?;
     Ok(ServiceIdentity {
         container_id: Some(parsed.container_id),
         started_at: Some(parsed.started_at),
@@ -787,11 +721,7 @@ fn check_success(output: &CommandOutput, context: &str) -> Result<(), ForgeError
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn dispatch(
-    ctx: &ForgeContext<'_>,
-    cmd: &ServiceCommand,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn dispatch(ctx: &ForgeContext<'_>, cmd: &ServiceCommand, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match cmd {
         ServiceCommand::List => handle_list(ctx, writer),
         ServiceCommand::Start { name } => handle_start(ctx, name, writer),
@@ -807,11 +737,7 @@ fn handle_list(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), For
 }
 
 /// Handle `service start`.
-fn handle_start(
-    ctx: &ForgeContext<'_>,
-    name: &str,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn handle_start(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let service = lookup_service(ctx, name)?;
     let rt = crate::runtime::resolve(ctx.runner, &ctx.config.spec.runtime.provider)?;
     let cname = container_name(&ctx.config.metadata.name, name);
@@ -824,11 +750,7 @@ fn handle_start(
         state_dir: &ctx.state_dir,
     };
     if ctx.dry_run {
-        return report_text_or_json(
-            writer,
-            &format!("would start service '{name}'"),
-            &ctx.format,
-        );
+        return report_text_or_json(writer, &format!("would start service '{name}'"), &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     start_service(ctx.runner, &params, service)?;
@@ -839,11 +761,7 @@ fn handle_start(
 }
 
 /// Handle `service stop`.
-fn handle_stop(
-    ctx: &ForgeContext<'_>,
-    name: &str,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn handle_stop(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> Result<(), ForgeError> {
     lookup_service(ctx, name)?;
     let rt = crate::runtime::resolve(ctx.runner, &ctx.config.spec.runtime.provider)?;
     let cname = container_name(&ctx.config.metadata.name, name);
@@ -881,20 +799,12 @@ fn handle_logs(
     if output.status != 0 {
         return Err(ForgeError::Command {
             program: spec.program.to_string_lossy().into_owned(),
-            message: format!(
-                "logs exited with status {}: {}",
-                output.status,
-                output.stderr.trim()
-            ),
+            message: format!("logs exited with status {}: {}", output.status, output.stderr.trim()),
         });
     }
-    writer
-        .write_all(output.stdout.as_bytes())
-        .map_err(ForgeError::Io)?;
+    writer.write_all(output.stdout.as_bytes()).map_err(ForgeError::Io)?;
     if !output.stderr.is_empty() {
-        writer
-            .write_all(output.stderr.as_bytes())
-            .map_err(ForgeError::Io)?;
+        writer.write_all(output.stderr.as_bytes()).map_err(ForgeError::Io)?;
     }
     Ok(())
 }
@@ -904,15 +814,12 @@ fn handle_logs(
 // -------------------------------------------------------------
 
 /// Find a service in the config by name.
-fn lookup_service<'a>(
-    ctx: &'a ForgeContext<'_>,
-    name: &str,
-) -> Result<&'a ServiceSpec, ForgeError> {
+fn lookup_service<'ctx>(ctx: &'ctx ForgeContext<'_>, name: &str) -> Result<&'ctx ServiceSpec, ForgeError> {
     ctx.config
         .spec
         .services
         .iter()
-        .find(|s| s.name == name)
+        .find(|svc| svc.name == name)
         .ok_or_else(|| ForgeError::Config(format!("service '{name}' not found in config")))
 }
 
@@ -956,12 +863,12 @@ fn render_service_list(
         OutputFormat::Json => {
             let envelope = output::success(serde_json::json!({ "services": services }));
             output::write_json(writer, &envelope)?;
-        }
+        },
         OutputFormat::Text => {
             for svc in services {
                 output::write_text(writer, &format_service_line(svc))?;
             }
-        }
+        },
     }
     Ok(())
 }
@@ -998,27 +905,21 @@ fn health_str(health: &ServiceHealth) -> &'static str {
 }
 
 /// Write a message as text or JSON envelope.
-fn report_text_or_json(
-    writer: &mut dyn Write,
-    message: &str,
-    format: &OutputFormat,
-) -> Result<(), ForgeError> {
+fn report_text_or_json(writer: &mut dyn Write, message: &str, format: &OutputFormat) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => {
             let envelope = output::success(serde_json::json!({ "message": message }));
             output::write_json(writer, &envelope)?;
-        }
+        },
         OutputFormat::Text => {
             output::write_text(writer, message)?;
-        }
+        },
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::command::runner::MockRunner;
 
@@ -1048,9 +949,7 @@ mod tests {
     fn owned_labels(env: &str) -> CommandOutput {
         CommandOutput {
             status: 0,
-            stdout: format!(
-                r#"{{"forge.managed":"true","forge.environment":"{env}","forge.service":"svc"}}"#
-            ),
+            stdout: format!(r#"{{"forge.managed":"true","forge.environment":"{env}","forge.service":"svc"}}"#),
             stderr: String::new(),
         }
     }
@@ -1121,10 +1020,7 @@ mod tests {
         let svc = minimal_service();
         start_service(&runner, &params, &svc).unwrap_or_else(|_| std::process::abort());
         assert!(runner.was_called("run"), "should call docker run");
-        assert!(
-            runner.was_called("forge.managed=true"),
-            "should include managed label"
-        );
+        assert!(runner.was_called("forge.managed=true"), "should include managed label");
     }
 
     #[test]
@@ -1186,10 +1082,7 @@ mod tests {
 
         let params = test_params();
         stop_service(&runner, &params).unwrap_or_else(|_| std::process::abort());
-        assert!(
-            !runner.was_called("stop"),
-            "should not call stop on missing container"
-        );
+        assert!(!runner.was_called("stop"), "should not call stop on missing container");
     }
 
     #[test]
@@ -1225,18 +1118,18 @@ mod tests {
 
     #[test]
     fn dependency_order_linear_chain() {
-        let mut a = minimal_service();
-        a.name = "a".to_owned();
+        let mut svc_a = minimal_service();
+        svc_a.name = "a".to_owned();
 
-        let mut b = minimal_service();
-        b.name = "b".to_owned();
-        b.depends_on = vec!["a".to_owned()];
+        let mut svc_b = minimal_service();
+        svc_b.name = "b".to_owned();
+        svc_b.depends_on = vec!["a".to_owned()];
 
-        let mut c = minimal_service();
-        c.name = "c".to_owned();
-        c.depends_on = vec!["b".to_owned()];
+        let mut svc_c = minimal_service();
+        svc_c.name = "c".to_owned();
+        svc_c.depends_on = vec!["b".to_owned()];
 
-        let services = vec![a, b, c];
+        let services = vec![svc_a, svc_b, svc_c];
         let order = dependency_order(&services).unwrap_or_else(|_| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
@@ -1252,12 +1145,12 @@ mod tests {
     // ---------------------------------------------------------
 
     /// Build `ServiceParams` for `run_spec` tests.
-    fn spec_params<'a>(
-        name: &'a str,
-        env_name: &'a str,
-        config_dir: &'a Path,
-        state_dir: &'a Path,
-    ) -> ServiceParams<'a> {
+    fn spec_params<'ctx>(
+        name: &'ctx str,
+        env_name: &'ctx str,
+        config_dir: &'ctx Path,
+        state_dir: &'ctx Path,
+    ) -> ServiceParams<'ctx> {
         ServiceParams {
             binary: "docker",
             container_name: name,
@@ -1270,13 +1163,8 @@ mod tests {
     #[test]
     fn run_spec_includes_labels() {
         let svc = minimal_service();
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(
             display.contains("forge.managed=true"),
@@ -1296,56 +1184,29 @@ mod tests {
     fn run_spec_network_environment() {
         let mut svc = minimal_service();
         svc.network = NetworkMode::Environment;
-        let p = spec_params(
-            "env-svc",
-            "myenv",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "myenv", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
-        assert!(
-            display.contains("--network"),
-            "should include --network: {display}"
-        );
-        assert!(
-            display.contains("myenv-net"),
-            "should use env network: {display}"
-        );
+        assert!(display.contains("--network"), "should include --network: {display}");
+        assert!(display.contains("myenv-net"), "should use env network: {display}");
     }
 
     #[test]
     fn run_spec_network_host() {
         let mut svc = minimal_service();
         svc.network = NetworkMode::Host;
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
-        assert!(
-            display.contains("--network"),
-            "should include --network: {display}"
-        );
-        assert!(
-            display.contains("host"),
-            "should use host network: {display}"
-        );
+        assert!(display.contains("--network"), "should include --network: {display}");
+        assert!(display.contains("host"), "should use host network: {display}");
     }
 
     #[test]
     fn run_spec_network_none() {
         let svc = minimal_service();
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(
             !display.contains("--network"),
@@ -1362,13 +1223,8 @@ mod tests {
             container: 80,
             protocol: "tcp".to_owned(),
         });
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(
             display.contains("127.0.0.1:8080:80/tcp"),
@@ -1384,13 +1240,8 @@ mod tests {
             target: "/mnt/data".to_owned(),
             read_only: true,
         });
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/cfg"),
-            Path::new("/cfg/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/cfg"), Path::new("/cfg/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(
             display.contains("/cfg/data:/mnt/data:ro"),
@@ -1402,13 +1253,8 @@ mod tests {
     fn run_spec_env_vars() {
         let mut svc = minimal_service();
         svc.env.insert("MY_VAR".to_owned(), "my_value".to_owned());
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(display.contains("-e"), "should include -e flag: {display}");
         assert!(
@@ -1429,34 +1275,18 @@ mod tests {
     fn run_spec_restart_policy() {
         let mut svc = minimal_service();
         svc.restart = RestartPolicy::UnlessStopped;
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
-        assert!(
-            display.contains("--restart"),
-            "should include --restart: {display}"
-        );
-        assert!(
-            display.contains("unless-stopped"),
-            "should include policy: {display}"
-        );
+        assert!(display.contains("--restart"), "should include --restart: {display}");
+        assert!(display.contains("unless-stopped"), "should include policy: {display}");
     }
 
     #[test]
     fn run_spec_no_privileged() {
         let svc = minimal_service();
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         assert!(
             !display.contains("--privileged"),
@@ -1470,17 +1300,12 @@ mod tests {
         // An image that would otherwise be parsed as a `docker run` flag.
         svc.image = "--volume=/:/host".to_owned();
         svc.args = vec!["alpine".to_owned()];
-        let p = spec_params(
-            "env-svc",
-            "env",
-            Path::new("/tmp"),
-            Path::new("/tmp/.forge"),
-        );
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let pos = spec
             .args
             .iter()
-            .position(|a| a == "--")
+            .position(|arg| arg == "--")
             .unwrap_or_else(|| std::process::abort());
         assert_eq!(
             spec.args.get(pos + 1).map(OsString::as_os_str),
@@ -1499,8 +1324,8 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap_or_else(|_| std::process::abort());
         let mut svc = minimal_service();
         svc.inherit_host_group = true;
-        let p = spec_params("env-svc", "env", dir.path(), &state);
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", dir.path(), &state);
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         let gid = std::fs::metadata(&state)
             .unwrap_or_else(|_| std::process::abort())
@@ -1539,8 +1364,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
         let state = dir.path().join(".forge");
         std::fs::create_dir_all(&state).unwrap_or_else(|_| std::process::abort());
-        let resolved = resolve_source(".forge/runtime/edge", Path::new("/env"), &state)
-            .unwrap_or_else(|_| std::process::abort());
+        let resolved =
+            resolve_source(".forge/runtime/edge", Path::new("/env"), &state).unwrap_or_else(|_| std::process::abort());
         let canonical = std::fs::canonicalize(&state).unwrap_or_else(|_| std::process::abort());
         assert_eq!(resolved, canonical.join("runtime/edge"), "state-dir join");
     }
@@ -1550,8 +1375,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
         let cfg = dir.path().join("project");
         std::fs::create_dir_all(&cfg).unwrap_or_else(|_| std::process::abort());
-        std::os::unix::fs::symlink(Path::new("/"), cfg.join("rootlink"))
-            .unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(Path::new("/"), cfg.join("rootlink")).unwrap_or_else(|_| std::process::abort());
 
         let result = resolve_source("rootlink/etc", &cfg, Path::new("/state"));
 
@@ -1571,10 +1395,7 @@ mod tests {
 
         let result = resolve_source(".forge/runtime/escape", Path::new("/env"), &state);
 
-        assert!(
-            result.is_err(),
-            "a symlink out of the state directory must not resolve"
-        );
+        assert!(result.is_err(), "a symlink out of the state directory must not resolve");
     }
 
     #[test]
@@ -1617,11 +1438,10 @@ mod tests {
         let cfg = dir.path().join("project");
         std::fs::create_dir_all(cfg.join("configs/app")).unwrap_or_else(|_| std::process::abort());
 
-        let resolved = resolve_source("configs/app", &cfg, Path::new("/state"))
-            .unwrap_or_else(|_| std::process::abort());
+        let resolved =
+            resolve_source("configs/app", &cfg, Path::new("/state")).unwrap_or_else(|_| std::process::abort());
 
-        let canonical = std::fs::canonicalize(cfg.join("configs/app"))
-            .unwrap_or_else(|_| std::process::abort());
+        let canonical = std::fs::canonicalize(cfg.join("configs/app")).unwrap_or_else(|_| std::process::abort());
         assert_eq!(resolved, canonical, "in-tree source should still resolve");
     }
 
@@ -1632,8 +1452,7 @@ mod tests {
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(state.join("runtime")).unwrap_or_else(|_| std::process::abort());
         std::fs::create_dir_all(&outside).unwrap_or_else(|_| std::process::abort());
-        std::os::unix::fs::symlink(&outside, state.join("runtime/out"))
-            .unwrap_or_else(|_| std::process::abort());
+        std::os::unix::fs::symlink(&outside, state.join("runtime/out")).unwrap_or_else(|_| std::process::abort());
         let vols = vec![VolumeMount {
             source: ".forge/runtime/out".to_owned(),
             target: "/output".to_owned(),
@@ -1659,8 +1478,8 @@ mod tests {
             target: "/etc/grid".to_owned(),
             read_only: true,
         });
-        let p = spec_params("env-svc", "env", Path::new("/cfg"), &state);
-        let spec = run_spec(&p, &svc).unwrap_or_else(|_| std::process::abort());
+        let params = spec_params("env-svc", "env", Path::new("/cfg"), &state);
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
         let canonical = std::fs::canonicalize(&state).unwrap_or_else(|_| std::process::abort());
         let expected = format!(
@@ -1689,8 +1508,7 @@ mod tests {
             target: "/output".to_owned(),
             read_only: false,
         }];
-        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false)
-            .unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false).unwrap_or_else(|_| std::process::abort());
         let created = state.join("runtime/out");
         assert!(created.is_dir(), "directory should exist");
         let mode = std::fs::metadata(&created)
@@ -1713,18 +1531,14 @@ mod tests {
             target: "/output".to_owned(),
             read_only: false,
         }];
-        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, true)
-            .unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, true).unwrap_or_else(|_| std::process::abort());
         let mode = std::fs::metadata(state.join("runtime/out"))
             .unwrap_or_else(|_| std::process::abort())
             .permissions()
             .mode()
             & 0o777;
 
-        assert_eq!(
-            mode, 0o770,
-            "group-shared runtime should exclude other users"
-        );
+        assert_eq!(mode, 0o770, "group-shared runtime should exclude other users");
     }
 
     #[test]
@@ -1737,13 +1551,9 @@ mod tests {
             target: "/kube".to_owned(),
             read_only: true,
         }];
-        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false)
-            .unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false).unwrap_or_else(|_| std::process::abort());
         let skipped = state.join("runtime/kube");
-        assert!(
-            !skipped.exists(),
-            "read-only runtime dir should not be created"
-        );
+        assert!(!skipped.exists(), "read-only runtime dir should not be created");
     }
 
     #[test]
@@ -1758,13 +1568,9 @@ mod tests {
             target: "/etc/app".to_owned(),
             read_only: false,
         }];
-        prepare_writable_volumes(&vols, &cfg, &state, false)
-            .unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, &cfg, &state, false).unwrap_or_else(|_| std::process::abort());
         let skipped = cfg.join("configs/app");
-        assert!(
-            !skipped.exists(),
-            "non-runtime config source should not be created"
-        );
+        assert!(!skipped.exists(), "non-runtime config source should not be created");
     }
 
     #[test]
@@ -1778,10 +1584,8 @@ mod tests {
             target: "/output".to_owned(),
             read_only: false,
         }];
-        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false)
-            .unwrap_or_else(|_| std::process::abort());
-        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false)
-            .unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false).unwrap_or_else(|_| std::process::abort());
+        prepare_writable_volumes(&vols, Path::new("/cfg"), &state, false).unwrap_or_else(|_| std::process::abort());
         let created = state.join("runtime/out");
         let mode = std::fs::metadata(&created)
             .unwrap_or_else(|_| std::process::abort())
@@ -1804,22 +1608,10 @@ mod tests {
     fn identity_spec_structured_argv() {
         let spec = identity_spec("docker", "my-container");
         assert_eq!(spec.program, "docker", "program");
-        let args: Vec<_> = spec.args.iter().map(|a| a.to_string_lossy()).collect();
-        assert_eq!(
-            args.first().map(AsRef::as_ref),
-            Some("inspect"),
-            "first arg"
-        );
-        assert_eq!(
-            args.get(1).map(AsRef::as_ref),
-            Some("--format"),
-            "second arg"
-        );
-        assert_eq!(
-            args.last().map(AsRef::as_ref),
-            Some("my-container"),
-            "last arg"
-        );
+        let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(args.first().map(AsRef::as_ref), Some("inspect"), "first arg");
+        assert_eq!(args.get(1).map(AsRef::as_ref), Some("--format"), "second arg");
+        assert_eq!(args.last().map(AsRef::as_ref), Some("my-container"), "last arg");
         assert!(spec.stdin.is_none(), "no stdin");
     }
 
@@ -1834,8 +1626,7 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let id = inspect_identity(&runner, "docker", "test-ctr")
-            .unwrap_or_else(|_| std::process::abort());
+        let id = inspect_identity(&runner, "docker", "test-ctr").unwrap_or_else(|_| std::process::abort());
         assert_eq!(
             id.container_id.as_deref(),
             Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
@@ -1854,8 +1645,7 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let id = inspect_identity(&runner, "docker", "test-ctr")
-            .unwrap_or_else(|_| std::process::abort());
+        let id = inspect_identity(&runner, "docker", "test-ctr").unwrap_or_else(|_| std::process::abort());
         assert_eq!(
             id.started_at.as_deref(),
             Some("2026-07-22T14:30:00.123456789Z"),
@@ -1874,8 +1664,7 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let id = inspect_identity(&runner, "docker", "test-ctr")
-            .unwrap_or_else(|_| std::process::abort());
+        let id = inspect_identity(&runner, "docker", "test-ctr").unwrap_or_else(|_| std::process::abort());
         assert_eq!(id.restart_count, Some(0), "restart_count");
     }
 
@@ -1890,8 +1679,7 @@ mod tests {
                 stderr: "no such container\n".to_owned(),
             },
         );
-        let id =
-            inspect_identity(&runner, "docker", "gone").unwrap_or_else(|_| std::process::abort());
+        let id = inspect_identity(&runner, "docker", "gone").unwrap_or_else(|_| std::process::abort());
         assert!(id.container_id.is_none(), "container_id should be None");
         assert!(id.started_at.is_none(), "started_at should be None");
         assert!(id.restart_count.is_none(), "restart_count should be None");
@@ -1914,10 +1702,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("cannot parse service inspect"),
-            "error message: {msg}"
-        );
+        assert!(msg.contains("cannot parse service inspect"), "error message: {msg}");
     }
 
     // ---------------------------------------------------------
@@ -1928,18 +1713,14 @@ mod tests {
     fn logs_spec_without_tail() {
         let spec = logs_spec("docker", "my-svc", None);
         assert_eq!(spec.program, "docker", "program");
-        let args: Vec<_> = spec.args.iter().map(|a| a.to_string_lossy()).collect();
+        let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert_eq!(args.as_slice(), &["logs", "my-svc"], "argv");
     }
 
     #[test]
     fn logs_spec_with_tail() {
         let spec = logs_spec("docker", "my-svc", Some(50));
-        let args: Vec<_> = spec.args.iter().map(|a| a.to_string_lossy()).collect();
-        assert_eq!(
-            args.as_slice(),
-            &["logs", "--tail", "50", "my-svc"],
-            "argv with --tail"
-        );
+        let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(args.as_slice(), &["logs", "--tail", "50", "my-svc"], "argv with --tail");
     }
 }

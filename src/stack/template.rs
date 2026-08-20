@@ -64,10 +64,7 @@ pub fn render(template: &str, ctx: &TemplateContext) -> Result<String, ForgeErro
 ///
 /// Returns [`ForgeError::Config`] if a variable path cannot be resolved against
 /// the context or if the rendered output exceeds `max_rendered_bytes`.
-#[expect(
-    clippy::string_slice,
-    reason = "{{ and }} are ASCII; find returns byte boundaries"
-)]
+#[expect(clippy::string_slice, reason = "{{ and }} are ASCII; find returns byte boundaries")]
 pub fn render_with_limit(
     template: &str,
     ctx: &TemplateContext,
@@ -77,13 +74,13 @@ pub fn render_with_limit(
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         result.push_str(&rest[..start]);
-        let after_open = &rest[start + 2..];
+        let after_open = &rest[start.saturating_add(2)..];
         let end = find_close(after_open, template)?;
         let var_path = after_open[..end].trim();
         let value = resolve_variable(var_path, ctx)?;
         result.push_str(&value);
         check_rendered_size(&result, max_rendered_bytes)?;
-        rest = &after_open[end + 2..];
+        rest = &after_open[end.saturating_add(2)..];
     }
     result.push_str(rest);
     check_rendered_size(&result, max_rendered_bytes)?;
@@ -133,9 +130,7 @@ fn resolve_cluster(parts: &[&str], ctx: &TemplateContext) -> Result<String, Forg
     match field {
         "name" => Ok(ctx.cluster_name.clone()),
         "properties" => resolve_property(parts, ctx),
-        _ => Err(ForgeError::Config(format!(
-            "unknown cluster field '{field}'"
-        ))),
+        _ => Err(ForgeError::Config(format!("unknown cluster field '{field}'"))),
     }
 }
 
@@ -143,9 +138,7 @@ fn resolve_cluster(parts: &[&str], ctx: &TemplateContext) -> Result<String, Forg
 fn resolve_property(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeError> {
     let key_path = parts.get(2).copied().unwrap_or_default();
     if key_path.is_empty() {
-        return Err(ForgeError::Config(
-            "cluster.properties requires a key".to_owned(),
-        ));
+        return Err(ForgeError::Config("cluster.properties requires a key".to_owned()));
     }
     let segments: Vec<&str> = key_path.split('.').collect();
     let root_key = segments.first().copied().unwrap_or_default();
@@ -167,9 +160,10 @@ fn resolve_stack(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeE
 
 /// Resolve `item` or `item.FIELD`.
 fn resolve_item(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeError> {
-    let val = ctx.item.as_ref().ok_or_else(|| {
-        ForgeError::Config("'item' is only available inside for-each steps".to_owned())
-    })?;
+    let val = ctx
+        .item
+        .as_ref()
+        .ok_or_else(|| ForgeError::Config("'item' is only available inside for-each steps".to_owned()))?;
     if parts.len() == 1 {
         return value_to_string(val);
     }
@@ -180,18 +174,18 @@ fn resolve_item(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeEr
 
 /// Resolve `network.dnsZone` or `network.pool`.
 fn resolve_network(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeError> {
-    let vars = ctx.network.as_ref().ok_or_else(|| {
-        ForgeError::Config("network variables require spec.network.crossCluster: true".to_owned())
-    })?;
+    let vars = ctx
+        .network
+        .as_ref()
+        .ok_or_else(|| ForgeError::Config("network variables require spec.network.crossCluster: true".to_owned()))?;
     let field = parts.get(1).copied().unwrap_or_default();
     match field {
         "dnsZone" => Ok(vars.dns_zone.clone()),
-        "pool" => vars.pool.clone().ok_or_else(|| {
-            ForgeError::Config("no MetalLB pool allocated for this cluster".to_owned())
-        }),
-        _ => Err(ForgeError::Config(format!(
-            "unknown network field '{field}'"
-        ))),
+        "pool" => vars
+            .pool
+            .clone()
+            .ok_or_else(|| ForgeError::Config("no MetalLB pool allocated for this cluster".to_owned())),
+        _ => Err(ForgeError::Config(format!("unknown network field '{field}'"))),
     }
 }
 
@@ -208,11 +202,10 @@ fn resolve_captures(parts: &[&str], ctx: &TemplateContext) -> Result<String, For
         .captures
         .get(cluster)
         .ok_or_else(|| ForgeError::Config(format!("no captures found for cluster '{cluster}'")))?;
-    cluster_caps.get(key).cloned().ok_or_else(|| {
-        ForgeError::Config(format!(
-            "capture key '{key}' not found for cluster '{cluster}'"
-        ))
-    })
+    cluster_caps
+        .get(key)
+        .cloned()
+        .ok_or_else(|| ForgeError::Config(format!("capture key '{key}' not found for cluster '{cluster}'")))
 }
 
 /// Walk into a JSON value following dot-separated path segments.
@@ -230,13 +223,15 @@ fn navigate_value(val: &serde_json::Value, segments: &[&str]) -> Result<String, 
 /// Convert a scalar JSON value to a string.
 fn value_to_string(val: &serde_json::Value) -> Result<String, ForgeError> {
     match val {
-        serde_json::Value::String(s) => Ok(s.clone()),
-        serde_json::Value::Number(n) => Ok(n.to_string()),
-        serde_json::Value::Bool(b) => Ok(b.to_string()),
-        _ => Err(ForgeError::Config(format!(
-            "cannot convert {kind} to template string",
-            kind = value_kind(val)
-        ))),
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Number(num) => Ok(num.to_string()),
+        serde_json::Value::Bool(flag) => Ok(flag.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Err(ForgeError::Config(format!(
+                "cannot convert {kind} to template string",
+                kind = value_kind(val)
+            )))
+        },
     }
 }
 
@@ -261,10 +256,7 @@ mod tests {
             cluster_name: "hub".to_owned(),
             stack_name: "base".to_owned(),
             properties: BTreeMap::from([
-                (
-                    "model".to_owned(),
-                    serde_json::Value::String("gpt-4".to_owned()),
-                ),
+                ("model".to_owned(), serde_json::Value::String("gpt-4".to_owned())),
                 ("port".to_owned(), serde_json::json!(8080)),
             ]),
             item: None,
@@ -276,16 +268,14 @@ mod tests {
     #[test]
     fn render_cluster_name() {
         let ctx = test_ctx();
-        let result =
-            render("ns-{{ cluster.name }}", &ctx).unwrap_or_else(|_| std::process::abort());
+        let result = render("ns-{{ cluster.name }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "ns-hub", "should resolve cluster.name");
     }
 
     #[test]
     fn render_cluster_property() {
         let ctx = test_ctx();
-        let result = render("{{ cluster.properties.model }}", &ctx)
-            .unwrap_or_else(|_| std::process::abort());
+        let result = render("{{ cluster.properties.model }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "gpt-4", "should resolve cluster property");
     }
 
@@ -293,8 +283,7 @@ mod tests {
     fn render_stack_name_and_item() {
         let mut ctx = test_ctx();
         ctx.item = Some(serde_json::Value::String("worker".to_owned()));
-        let result =
-            render("{{ stack.name }}-{{ item }}", &ctx).unwrap_or_else(|_| std::process::abort());
+        let result = render("{{ stack.name }}-{{ item }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "base-worker", "should resolve stack.name and item");
     }
 
@@ -302,22 +291,15 @@ mod tests {
     fn render_item_field_access() {
         let mut ctx = test_ctx();
         ctx.item = Some(serde_json::json!({"host": "10.0.0.1", "port": 8080}));
-        let result = render("{{ item.host }}:{{ item.port }}", &ctx)
-            .unwrap_or_else(|_| std::process::abort());
+        let result = render("{{ item.host }}:{{ item.port }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "10.0.0.1:8080", "should access item fields");
     }
 
     #[test]
     fn render_missing_variable_returns_error() {
         let ctx = test_ctx();
-        assert!(
-            render("{{ cluster.unknown }}", &ctx).is_err(),
-            "unknown cluster field"
-        );
-        assert!(
-            render("{{ item }}", &ctx).is_err(),
-            "item without for-each context"
-        );
+        assert!(render("{{ cluster.unknown }}", &ctx).is_err(), "unknown cluster field");
+        assert!(render("{{ item }}", &ctx).is_err(), "item without for-each context");
         assert!(render("{{ bad.var }}", &ctx).is_err(), "unknown root");
     }
 
@@ -335,16 +317,9 @@ mod tests {
     #[test]
     fn render_with_limit_allows_larger_manifest_templates() {
         let ctx = test_ctx();
-        let template = format!(
-            "{}{{{{ cluster.name }}}}",
-            "x".repeat(MAX_RENDERED_TEMPLATE_BYTES)
-        );
-        let result = render_with_limit(
-            &template,
-            &ctx,
-            MAX_RENDERED_TEMPLATE_BYTES.saturating_add(16),
-        )
-        .unwrap_or_else(|_| std::process::abort());
+        let template = format!("{}{{{{ cluster.name }}}}", "x".repeat(MAX_RENDERED_TEMPLATE_BYTES));
+        let result = render_with_limit(&template, &ctx, MAX_RENDERED_TEMPLATE_BYTES.saturating_add(16))
+            .unwrap_or_else(|_| std::process::abort());
         assert!(
             result.ends_with("hub"),
             "should render with caller-supplied larger limit"
@@ -356,13 +331,10 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.captures = BTreeMap::from([(
             "provider-east".to_owned(),
-            BTreeMap::from([(
-                "provider-gateway-ip".to_owned(),
-                "172.18.255.200".to_owned(),
-            )]),
+            BTreeMap::from([("provider-gateway-ip".to_owned(), "172.18.255.200".to_owned())]),
         )]);
-        let result = render("{{ captures.provider-east.provider-gateway-ip }}", &ctx)
-            .unwrap_or_else(|_| std::process::abort());
+        let result =
+            render("{{ captures.provider-east.provider-gateway-ip }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "172.18.255.200", "should resolve captured value");
     }
 
@@ -392,8 +364,7 @@ mod tests {
             dns_zone: "forge.test".to_owned(),
             pool: None,
         });
-        let result =
-            render("{{ network.dnsZone }}", &ctx).unwrap_or_else(|_| std::process::abort());
+        let result = render("{{ network.dnsZone }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "forge.test", "should resolve network.dnsZone");
     }
 
@@ -405,10 +376,7 @@ mod tests {
             pool: Some("172.18.255.231-172.18.255.250".to_owned()),
         });
         let result = render("{{ network.pool }}", &ctx).unwrap_or_else(|_| std::process::abort());
-        assert_eq!(
-            result, "172.18.255.231-172.18.255.250",
-            "should resolve network.pool"
-        );
+        assert_eq!(result, "172.18.255.231-172.18.255.250", "should resolve network.pool");
     }
 
     #[test]

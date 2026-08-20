@@ -26,7 +26,7 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
     let entries = build_entries(ctx, &st, &live);
     let net_info = network_info(&st);
     let svc_entries = service_entries(ctx.runner, st.runtime.as_deref(), &st);
-    render_all(writer, &entries, &net_info, &svc_entries, &ctx.format)
+    render_all(writer, &entries, net_info.as_ref(), &svc_entries, &ctx.format)
 }
 
 // ---------------------------------------------------------------
@@ -46,26 +46,17 @@ struct StatusEntry {
 }
 
 /// Build status entries from config, state, and live clusters.
-fn build_entries(
-    ctx: &ForgeContext<'_>,
-    st: &state::ForgeState,
-    live: &[String],
-) -> Vec<StatusEntry> {
+fn build_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]) -> Vec<StatusEntry> {
     ctx.config
         .spec
         .clusters
         .iter()
-        .map(|c| entry_for_cluster(ctx, st, live, &c.name))
+        .map(|cluster| entry_for_cluster(ctx, st, live, &cluster.name))
         .collect()
 }
 
 /// Build a status entry for one configured cluster.
-fn entry_for_cluster(
-    ctx: &ForgeContext<'_>,
-    st: &state::ForgeState,
-    live: &[String],
-    name: &str,
-) -> StatusEntry {
+fn entry_for_cluster(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String], name: &str) -> StatusEntry {
     let kind_name = kind_ops::kind_cluster_name(&ctx.config.spec.runtime.cluster_prefix, name);
     let state_phase = state_phase_label(st, name);
     let is_live = live.contains(&kind_name);
@@ -79,10 +70,7 @@ fn entry_for_cluster(
 
 /// Get the state phase label for a cluster, or "unknown".
 fn state_phase_label(st: &state::ForgeState, name: &str) -> String {
-    state::find_cluster(st, name).map_or_else(
-        || "unknown".to_owned(),
-        |c| format!("{:?}", c.phase).to_lowercase(),
-    )
+    state::find_cluster(st, name).map_or_else(|| "unknown".to_owned(), |cl| format!("{:?}", cl.phase).to_lowercase())
 }
 
 // ---------------------------------------------------------------
@@ -124,29 +112,21 @@ struct SvcEntry {
 }
 
 /// Build service status entries from state with live identity.
-fn service_entries(
-    runner: &dyn CommandRunner,
-    binary: Option<&str>,
-    st: &state::ForgeState,
-) -> Vec<SvcEntry> {
+fn service_entries(runner: &dyn CommandRunner, binary: Option<&str>, st: &state::ForgeState) -> Vec<SvcEntry> {
     st.services
         .iter()
-        .map(|s| SvcEntry {
-            name: s.name.clone(),
-            container_name: s.container_name.clone(),
-            phase: format!("{:?}", s.phase).to_lowercase(),
-            health: format!("{:?}", s.health).to_lowercase(),
-            identity: inspect_live(runner, binary, &s.container_name),
+        .map(|svc| SvcEntry {
+            name: svc.name.clone(),
+            container_name: svc.container_name.clone(),
+            phase: format!("{:?}", svc.phase).to_lowercase(),
+            health: format!("{:?}", svc.health).to_lowercase(),
+            identity: inspect_live(runner, binary, &svc.container_name),
         })
         .collect()
 }
 
 /// Inspect a container for identity, falling back to empty on error.
-fn inspect_live(
-    runner: &dyn CommandRunner,
-    binary: Option<&str>,
-    container_name: &str,
-) -> ServiceIdentity {
+fn inspect_live(runner: &dyn CommandRunner, binary: Option<&str>, container_name: &str) -> ServiceIdentity {
     let Some(bin) = binary else {
         return ServiceIdentity::empty();
     };
@@ -164,7 +144,7 @@ fn inspect_live(
 fn render_all(
     writer: &mut dyn Write,
     entries: &[StatusEntry],
-    net: &Option<NetInfo>,
+    net: Option<&NetInfo>,
     services: &[SvcEntry],
     format: &OutputFormat,
 ) -> Result<(), ForgeError> {
@@ -178,15 +158,15 @@ fn render_all(
 fn render_json(
     writer: &mut dyn Write,
     entries: &[StatusEntry],
-    net: &Option<NetInfo>,
+    net: Option<&NetInfo>,
     services: &[SvcEntry],
 ) -> Result<(), ForgeError> {
     let items: Vec<_> = entries.iter().map(entry_to_json).collect();
     let mut data = serde_json::json!({ "clusters": items });
-    if let (Some(n), Some(obj)) = (net, data.as_object_mut()) {
+    if let (Some(nd), Some(obj)) = (net, data.as_object_mut()) {
         obj.insert(
             "network".to_owned(),
-            serde_json::json!({ "name": n.name, "phase": n.phase }),
+            serde_json::json!({ "name": nd.name, "phase": nd.phase }),
         );
     }
     if let (false, Some(obj)) = (services.is_empty(), data.as_object_mut()) {
@@ -199,25 +179,25 @@ fn render_json(
 }
 
 /// Convert one service entry to JSON.
-fn svc_to_json(s: &SvcEntry) -> serde_json::Value {
+fn svc_to_json(svc: &SvcEntry) -> serde_json::Value {
     serde_json::json!({
-        "name": s.name,
-        "containerName": s.container_name,
-        "phase": s.phase,
-        "health": s.health,
-        "containerId": s.identity.container_id,
-        "startedAt": s.identity.started_at,
-        "restartCount": s.identity.restart_count,
+        "name": svc.name,
+        "containerName": svc.container_name,
+        "phase": svc.phase,
+        "health": svc.health,
+        "containerId": svc.identity.container_id,
+        "startedAt": svc.identity.started_at,
+        "restartCount": svc.identity.restart_count,
     })
 }
 
 /// Convert one entry to JSON.
-fn entry_to_json(e: &StatusEntry) -> serde_json::Value {
+fn entry_to_json(entry: &StatusEntry) -> serde_json::Value {
     serde_json::json!({
-        "name": e.name,
-        "kindName": e.kind_name,
-        "statePhase": e.state_phase,
-        "live": e.live,
+        "name": entry.name,
+        "kindName": entry.kind_name,
+        "statePhase": entry.state_phase,
+        "live": entry.live,
     })
 }
 
@@ -225,40 +205,40 @@ fn entry_to_json(e: &StatusEntry) -> serde_json::Value {
 fn render_text(
     writer: &mut dyn Write,
     entries: &[StatusEntry],
-    net: &Option<NetInfo>,
+    net: Option<&NetInfo>,
     services: &[SvcEntry],
 ) -> Result<(), ForgeError> {
-    if let Some(n) = net {
-        output::write_text(writer, &format!("  network: {} ({})", n.name, n.phase))?;
+    if let Some(nd) = net {
+        output::write_text(writer, &format!("  network: {} ({})", nd.name, nd.phase))?;
     }
-    for e in entries {
-        output::write_text(writer, &format_entry_text(e))?;
+    for entry in entries {
+        output::write_text(writer, &format_entry_text(entry))?;
     }
-    for s in services {
-        output::write_text(writer, &format_svc_text(s))?;
+    for svc in services {
+        output::write_text(writer, &format_svc_text(svc))?;
     }
     Ok(())
 }
 
 /// Format a service entry as a text line.
-fn format_svc_text(s: &SvcEntry) -> String {
-    let id_label = s
+fn format_svc_text(svc: &SvcEntry) -> String {
+    let id_label = svc
         .identity
         .container_id
         .as_deref()
         .map_or("none", |id| id.get(..12).unwrap_or(id));
     format!(
         "  {}: phase={}, health={}, container={}, id={}",
-        s.name, s.phase, s.health, s.container_name, id_label
+        svc.name, svc.phase, svc.health, svc.container_name, id_label
     )
 }
 
 /// Format one entry as a text line.
-fn format_entry_text(e: &StatusEntry) -> String {
-    let live_label = if e.live { "live" } else { "not found" };
+fn format_entry_text(entry: &StatusEntry) -> String {
+    let live_label = if entry.live { "live" } else { "not found" };
     format!(
         "  {}: state={}, kind={} ({})",
-        e.name, e.state_phase, e.kind_name, live_label
+        entry.name, entry.state_phase, entry.kind_name, live_label
     )
 }
 
@@ -374,10 +354,7 @@ spec:
             dry_run: false,
         };
         let text = run_status(&ctx);
-        assert!(
-            text.contains("unknown"),
-            "should show unknown state: {text}"
-        );
+        assert!(text.contains("unknown"), "should show unknown state: {text}");
         assert!(text.contains("not found"), "should show not found: {text}");
     }
 
@@ -468,8 +445,8 @@ spec:
     fn first_service(envelope: &serde_json::Value) -> &serde_json::Value {
         let Some(svc) = envelope
             .get("data")
-            .and_then(|d| d.get("services"))
-            .and_then(|s| s.get(0))
+            .and_then(|data| data.get("services"))
+            .and_then(|svcs| svcs.get(0))
         else {
             std::process::abort();
         };
@@ -497,20 +474,14 @@ spec:
         let envelope = parse_envelope(&buf);
         let svc = first_service(&envelope);
         assert!(
-            svc.get("containerId")
-                .is_some_and(serde_json::Value::is_string),
+            svc.get("containerId").is_some_and(serde_json::Value::is_string),
             "containerId"
         );
         assert!(
-            svc.get("startedAt")
-                .is_some_and(serde_json::Value::is_string),
+            svc.get("startedAt").is_some_and(serde_json::Value::is_string),
             "startedAt"
         );
-        assert_eq!(
-            svc.get("restartCount"),
-            Some(&serde_json::json!(0)),
-            "restartCount"
-        );
+        assert_eq!(svc.get("restartCount"), Some(&serde_json::json!(0)), "restartCount");
     }
 
     #[test]
@@ -534,8 +505,7 @@ spec:
         let envelope = parse_envelope(&buf);
         let svc = first_service(&envelope);
         assert!(
-            svc.get("containerId")
-                .is_some_and(serde_json::Value::is_null),
+            svc.get("containerId").is_some_and(serde_json::Value::is_null),
             "containerId null"
         );
         assert!(
@@ -543,8 +513,7 @@ spec:
             "startedAt null"
         );
         assert!(
-            svc.get("restartCount")
-                .is_some_and(serde_json::Value::is_null),
+            svc.get("restartCount").is_some_and(serde_json::Value::is_null),
             "restartCount null"
         );
     }
@@ -572,10 +541,7 @@ spec:
             dry_run: false,
         };
         let text = run_status(&ctx);
-        assert!(
-            text.contains("test-net"),
-            "should show network name: {text}"
-        );
+        assert!(text.contains("test-net"), "should show network name: {text}");
         assert!(text.contains("active"), "should show network phase: {text}");
     }
 }

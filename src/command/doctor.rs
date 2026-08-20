@@ -62,18 +62,14 @@ struct ToolStatus {
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn run(
-    runner: &dyn CommandRunner,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn run(runner: &dyn CommandRunner, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let results = probe_tools(runner);
     render_results(&results, format, writer)
 }
 
 /// Probe all tools and collect results.
 fn probe_tools(runner: &dyn CommandRunner) -> Vec<ToolStatus> {
-    TOOLS.iter().map(|t| probe_one(runner, t)).collect()
+    TOOLS.iter().map(|tool| probe_one(runner, tool)).collect()
 }
 
 /// Probe one tool by running `which <name>`.
@@ -117,11 +113,7 @@ fn missing_status(tool: &ToolProbe) -> ToolStatus {
 }
 
 /// Render results in the requested format.
-fn render_results(
-    results: &[ToolStatus],
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn render_results(results: &[ToolStatus], format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => render_json(results, writer),
         OutputFormat::Text => render_text(results, writer),
@@ -143,7 +135,7 @@ fn render_text(results: &[ToolStatus], writer: &mut dyn Write) -> Result<(), For
         let path = tool
             .path
             .as_deref()
-            .map(|p| format!(" -> {p}"))
+            .map(|path| format!(" -> {path}"))
             .unwrap_or_default();
         output::write_text(writer, &format!("  {icon}: {}{req}{path}", tool.name))?;
     }
@@ -153,7 +145,7 @@ fn render_text(results: &[ToolStatus], writer: &mut dyn Write) -> Result<(), For
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::runner::{CommandOutput, MockRunner};
+    use crate::command::runner::MockRunner;
 
     /// Build a mock runner with kubectl and kind present.
     fn mock_with_tools() -> MockRunner {
@@ -174,14 +166,8 @@ mod tests {
         let mut buf = Vec::new();
         run(&runner, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("ok: kubectl"),
-            "kubectl should be found: {text}"
-        );
-        assert!(
-            text.contains("MISSING: docker"),
-            "docker should be missing: {text}"
-        );
+        assert!(text.contains("ok: kubectl"), "kubectl should be found: {text}");
+        assert!(text.contains("MISSING: docker"), "docker should be missing: {text}");
     }
 
     #[test]
@@ -200,8 +186,8 @@ mod tests {
         assert!(
             parsed
                 .get("data")
-                .and_then(|d| d.get("tools"))
-                .and_then(|t| t.as_array())
+                .and_then(|data| data.get("tools"))
+                .and_then(|tools| tools.as_array())
                 .is_some(),
             "should have data.tools array"
         );

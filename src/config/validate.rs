@@ -6,10 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    config::{
-        API_VERSION, ForgeConfig, HealthCheck, KIND, NetworkMode, RuntimeProvider, ServiceSpec,
-        StepSpec,
-    },
+    config::{API_VERSION, ForgeConfig, HealthCheck, KIND, NetworkMode, RuntimeProvider, ServiceSpec, StepSpec},
     error::ForgeError,
 };
 
@@ -66,9 +63,7 @@ fn check_kind(config: &ForgeConfig) -> Result<(), ForgeError> {
 /// Validate that a name is a valid DNS label.
 fn check_dns_label(name: &str, context: &str) -> Result<(), ForgeError> {
     if name.is_empty() {
-        return Err(ForgeError::Validation(format!(
-            "{context}: name must not be empty"
-        )));
+        return Err(ForgeError::Validation(format!("{context}: name must not be empty")));
     }
     validate_dns_label_rules(name, context)
 }
@@ -87,7 +82,7 @@ fn validate_dns_label_rules(name: &str, context: &str) -> Result<(), ForgeError>
 fn check_dns_label_chars(name: &str, context: &str) -> Result<(), ForgeError> {
     let valid = name
         .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-');
     if !valid {
         return Err(ForgeError::Validation(format!(
             "{context}: {name:?} contains invalid characters \
@@ -113,10 +108,7 @@ fn check_metadata_name(name: &str) -> Result<(), ForgeError> {
 }
 
 /// Derived network name must be safe for Docker/Podman.
-fn check_network_name(
-    env_name: &str,
-    spec: &crate::config::EnvironmentSpec,
-) -> Result<(), ForgeError> {
+fn check_network_name(env_name: &str, spec: &crate::config::EnvironmentSpec) -> Result<(), ForgeError> {
     let wants = spec.network.as_ref().is_some_and(|n| n.cross_cluster);
     if !wants {
         return Ok(());
@@ -134,7 +126,7 @@ fn check_docker_name(name: &str, context: &str) -> Result<(), ForgeError> {
     }
     let valid = name
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_' || ch == b'.');
     if !valid {
         return Err(ForgeError::Validation(format!(
             "{context}: {name:?} contains characters unsafe for Docker/Podman"
@@ -204,17 +196,13 @@ fn check_service_image(svc: &ServiceSpec) -> Result<(), ForgeError> {
     let ctx = format!("service {:?}: image", svc.name);
     check_non_blank(&svc.image, &ctx)?;
     if svc.image.len() > 512 {
-        return Err(ForgeError::Validation(format!(
-            "{ctx}: exceeds 512 characters"
-        )));
+        return Err(ForgeError::Validation(format!("{ctx}: exceeds 512 characters")));
     }
     // Rejected here as well as terminated with `--` at the call site: no image
     // reference legally starts with '-', so this only ever refuses input that
     // was trying to become a runtime flag.
     if svc.image.starts_with('-') {
-        return Err(ForgeError::Validation(format!(
-            "{ctx}: must not start with '-'"
-        )));
+        return Err(ForgeError::Validation(format!("{ctx}: must not start with '-'")));
     }
     Ok(())
 }
@@ -224,7 +212,7 @@ fn check_service_ports(svc: &ServiceSpec) -> Result<(), ForgeError> {
     for port in &svc.ports {
         check_port_nonzero(port.host, &svc.name, "host")?;
         check_port_nonzero(port.container, &svc.name, "container")?;
-        check_port_bind_address(&port.bind_address, &svc.name)?;
+        check_port_bind_address(port.bind_address.as_ref(), &svc.name)?;
         check_port_protocol_tcp(&port.protocol, &svc.name)?;
     }
     Ok(())
@@ -241,11 +229,8 @@ fn check_port_nonzero(port: u16, svc_name: &str, field: &str) -> Result<(), Forg
 }
 
 /// Validate an optional bind address as a valid IP.
-fn check_port_bind_address(addr: &Option<String>, svc_name: &str) -> Result<(), ForgeError> {
-    if let Some(addr) = addr
-        .as_ref()
-        .filter(|a| a.parse::<std::net::IpAddr>().is_err())
-    {
+fn check_port_bind_address(addr: Option<&String>, svc_name: &str) -> Result<(), ForgeError> {
+    if let Some(addr) = addr.filter(|bind| bind.parse::<std::net::IpAddr>().is_err()) {
         return Err(ForgeError::Validation(format!(
             "service {svc_name:?}: bind address {addr:?} is not a valid IP"
         )));
@@ -326,7 +311,7 @@ fn is_shell_safe_ident(key: &str) -> bool {
     if !first.is_ascii_alphabetic() && first != '_' {
         return false;
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// Validate container argument count and individual length.
@@ -383,7 +368,7 @@ fn check_health_port_is_reachable(svc: &ServiceSpec, hc: &HealthCheck) -> Result
     if svc
         .ports
         .iter()
-        .any(|p| p.container == hc.port && p.protocol == "tcp")
+        .any(|port| port.container == hc.port && port.protocol == "tcp")
     {
         return Ok(());
     }
@@ -432,12 +417,7 @@ fn check_duration_string(value: &str, context: &str) -> Result<(), ForgeError> {
 
 /// Validate that all service dependency references are valid.
 fn check_service_deps(config: &ForgeConfig) -> Result<(), ForgeError> {
-    let names: BTreeSet<&str> = config
-        .spec
-        .services
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
+    let names: BTreeSet<&str> = config.spec.services.iter().map(|svc| svc.name.as_str()).collect();
     for svc in &config.spec.services {
         for dep in &svc.depends_on {
             check_single_dep(&svc.name, dep, &names)?;
@@ -494,7 +474,7 @@ fn build_svc_name_index(services: &[ServiceSpec]) -> BTreeMap<&str, usize> {
     services
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.name.as_str(), i))
+        .map(|(idx, svc)| (svc.name.as_str(), idx))
         .collect()
 }
 
@@ -516,9 +496,7 @@ fn detect_dep_cycle(count: usize, adj: &[Vec<usize>]) -> Result<(), ForgeError> 
     let mut in_deg = compute_in_degrees(count, adj);
     let visited = kahn_bfs(&mut in_deg, adj);
     if visited != count {
-        return Err(ForgeError::Validation(
-            "service dependency cycle detected".to_owned(),
-        ));
+        return Err(ForgeError::Validation("service dependency cycle detected".to_owned()));
     }
     Ok(())
 }
@@ -528,8 +506,8 @@ fn compute_in_degrees(count: usize, adj: &[Vec<usize>]) -> Vec<usize> {
     let mut in_deg: Vec<usize> = vec![0; count];
     for edges in adj {
         for &to in edges {
-            if let Some(d) = in_deg.get_mut(to) {
-                *d = d.saturating_add(1);
+            if let Some(deg) = in_deg.get_mut(to) {
+                *deg = deg.saturating_add(1);
             }
         }
     }
@@ -541,17 +519,17 @@ fn kahn_bfs(in_deg: &mut [usize], adj: &[Vec<usize>]) -> usize {
     let mut queue: VecDeque<usize> = in_deg
         .iter()
         .enumerate()
-        .filter(|&(_, &d)| d == 0)
-        .map(|(i, _)| i)
+        .filter(|&(_, &deg)| deg == 0)
+        .map(|(idx, _)| idx)
         .collect();
     let mut visited: usize = 0;
     while let Some(node) = queue.pop_front() {
         visited = visited.saturating_add(1);
         if let Some(edges) = adj.get(node) {
             for &to in edges {
-                if let Some(d) = in_deg.get_mut(to) {
-                    *d = d.saturating_sub(1);
-                    if *d == 0 {
+                if let Some(deg) = in_deg.get_mut(to) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
                         queue.push_back(to);
                     }
                 }
@@ -601,21 +579,16 @@ fn check_stack_steps(config: &ForgeConfig) -> Result<(), ForgeError> {
 fn check_step(stack_name: &str, step: &StepSpec) -> Result<(), ForgeError> {
     match step {
         StepSpec::Url { url, sha256 } => check_url_step(stack_name, url, sha256),
-        StepSpec::Manifest { path }
-        | StepSpec::Kustomize { path }
-        | StepSpec::TemplateManifest { path } => check_step_path(stack_name, path),
+        StepSpec::Manifest { path } | StepSpec::Kustomize { path } | StepSpec::TemplateManifest { path } => {
+            check_step_path(stack_name, path)
+        },
         StepSpec::Helm { .. } => check_helm_step(stack_name, step),
         StepSpec::Deployment {
-            name,
-            image,
-            namespace,
-            args: _,
+            name, image, namespace, ..
         } => check_named_workload_step(stack_name, "deployment", name, image, namespace.as_deref()),
-        StepSpec::Service {
-            name,
-            port,
-            namespace,
-        } => check_service_step(stack_name, name, *port, namespace.as_deref()),
+        StepSpec::Service { name, port, namespace } => {
+            check_service_step(stack_name, name, *port, namespace.as_deref())
+        },
         StepSpec::Wait {
             resource,
             condition,
@@ -624,33 +597,17 @@ fn check_step(stack_name: &str, step: &StepSpec) -> Result<(), ForgeError> {
         } => check_wait_step(stack_name, resource, condition, timeout),
         StepSpec::Exec { command, env } => check_exec_step(stack_name, command, env),
         StepSpec::ForEach { property, steps } => check_for_each_step(stack_name, property, steps),
-        StepSpec::MetallbAutoPool { name } => {
-            check_named_resource_step(stack_name, "metallb pool", name, None)
-        }
-        StepSpec::CoreDnsForward { zone, upstreams } => {
-            check_coredns_forward_step(stack_name, zone, upstreams)
-        }
+        StepSpec::MetallbAutoPool { name } => check_named_resource_step(stack_name, "metallb pool", name, None),
+        StepSpec::CoreDnsForward { zone, upstreams } => check_coredns_forward_step(stack_name, zone, upstreams),
         StepSpec::Capture { .. } => check_capture_step(stack_name, step),
-        StepSpec::TemplateFile { source, target } => {
-            check_template_file_step(stack_name, source, target)
-        }
+        StepSpec::TemplateFile { source, target } => check_template_file_step(stack_name, source, target),
     }
 }
 
 /// Validate a template-file step.
-fn check_template_file_step(
-    stack_name: &str,
-    source: &str,
-    target: &str,
-) -> Result<(), ForgeError> {
-    check_relative_path(
-        source,
-        &format!("stack {stack_name:?}: template-file source"),
-    )?;
-    check_relative_path(
-        target,
-        &format!("stack {stack_name:?}: template-file target"),
-    )
+fn check_template_file_step(stack_name: &str, source: &str, target: &str) -> Result<(), ForgeError> {
+    check_relative_path(source, &format!("stack {stack_name:?}: template-file source"))?;
+    check_relative_path(target, &format!("stack {stack_name:?}: template-file target"))
 }
 
 /// Validate a capture step.
@@ -686,16 +643,11 @@ fn check_step_path(stack_name: &str, path: &str) -> Result<(), ForgeError> {
 }
 
 /// Validate a `CoreDNS` forward step.
-fn check_coredns_forward_step(
-    stack_name: &str,
-    zone: &str,
-    upstreams: &[String],
-) -> Result<(), ForgeError> {
+fn check_coredns_forward_step(stack_name: &str, zone: &str, upstreams: &[String]) -> Result<(), ForgeError> {
     let zone_ctx = format!("stack {stack_name:?}: coredns-forward zone");
     check_non_blank(zone, &zone_ctx)?;
-    validate_dns_zone_rules(zone).map_err(|_orig| {
-        ForgeError::Validation(format!("{zone_ctx}: {zone:?} is not a valid DNS zone"))
-    })?;
+    validate_dns_zone_rules(zone)
+        .map_err(|_orig| ForgeError::Validation(format!("{zone_ctx}: {zone:?} is not a valid DNS zone")))?;
     if upstreams.is_empty() {
         return Err(ForgeError::Validation(format!(
             "stack {stack_name:?}: coredns-forward requires at least one upstream"
@@ -714,13 +666,11 @@ fn check_upstream_value(value: &str, stack_name: &str) -> Result<(), ForgeError>
     let ctx = format!("stack {stack_name:?}: coredns-forward upstream");
     check_non_blank(value, &ctx)?;
     if value.len() > 253 {
-        return Err(ForgeError::Validation(format!(
-            "{ctx}: exceeds 253 characters"
-        )));
+        return Err(ForgeError::Validation(format!("{ctx}: exceeds 253 characters")));
     }
     let (host, port) = split_upstream_host_port(value);
-    if let Some(p) = port {
-        check_upstream_port(p, &ctx)?;
+    if let Some(port_str) = port {
+        check_upstream_port(port_str, &ctx)?;
     }
     check_upstream_host(host, &ctx)
 }
@@ -729,7 +679,7 @@ fn check_upstream_value(value: &str, stack_name: &str) -> Result<(), ForgeError>
 fn split_upstream_host_port(value: &str) -> (&str, Option<&str>) {
     if let Some(pos) = value.rfind(':') {
         let after = value.get(pos.saturating_add(1)..).unwrap_or("");
-        if !after.is_empty() && after.bytes().all(|b| b.is_ascii_digit()) {
+        if !after.is_empty() && after.bytes().all(|ch| ch.is_ascii_digit()) {
             return (value.get(..pos).unwrap_or(""), Some(after));
         }
     }
@@ -754,7 +704,7 @@ fn check_upstream_host(host: &str, ctx: &str) -> Result<(), ForgeError> {
     if host.is_empty() {
         return Err(ForgeError::Validation(format!("{ctx}: empty host")));
     }
-    if host.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+    if host.bytes().next().is_some_and(|ch| ch.is_ascii_digit()) {
         return check_upstream_ipv4(host, ctx);
     }
     check_upstream_dns_name(host, ctx)
@@ -762,9 +712,8 @@ fn check_upstream_host(host: &str, ctx: &str) -> Result<(), ForgeError> {
 
 /// Validate an IPv4 address.
 fn check_upstream_ipv4(host: &str, ctx: &str) -> Result<(), ForgeError> {
-    host.parse::<std::net::Ipv4Addr>().map_err(|_err| {
-        ForgeError::Validation(format!("{ctx}: {host:?} is not a valid IPv4 address"))
-    })?;
+    host.parse::<std::net::Ipv4Addr>()
+        .map_err(|_err| ForgeError::Validation(format!("{ctx}: {host:?} is not a valid IPv4 address")))?;
     Ok(())
 }
 
@@ -795,7 +744,7 @@ fn check_sha256(value: &str, context: &str) -> Result<(), ForgeError> {
     if is_full_field_template(value) {
         return Ok(());
     }
-    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if value.len() != 64 || !value.bytes().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(ForgeError::Validation(format!(
             "{context}: expected a 64-character SHA-256 hex digest"
         )));
@@ -829,9 +778,7 @@ fn check_relative_path(path: &str, context: &str) -> Result<(), ForgeError> {
 /// input that was trying to become a flag.
 fn check_not_option_like(value: &str, context: &str) -> Result<(), ForgeError> {
     if value.starts_with('-') {
-        return Err(ForgeError::Validation(format!(
-            "{context}: must not start with '-'"
-        )));
+        return Err(ForgeError::Validation(format!("{context}: must not start with '-'")));
     }
     Ok(())
 }
@@ -880,12 +827,7 @@ fn check_named_workload_step(
 }
 
 /// Validate a generated Service step.
-fn check_service_step(
-    stack_name: &str,
-    name: &str,
-    port: u16,
-    namespace: Option<&str>,
-) -> Result<(), ForgeError> {
+fn check_service_step(stack_name: &str, name: &str, port: u16, namespace: Option<&str>) -> Result<(), ForgeError> {
     check_named_resource_step(stack_name, "service", name, namespace)?;
     if port == 0 {
         return Err(ForgeError::Validation(format!(
@@ -904,12 +846,7 @@ fn check_optional_namespace(stack_name: &str, namespace: Option<&str>) -> Result
 }
 
 /// Validate a wait step.
-fn check_wait_step(
-    stack_name: &str,
-    resource: &str,
-    condition: &str,
-    timeout: &str,
-) -> Result<(), ForgeError> {
+fn check_wait_step(stack_name: &str, resource: &str, condition: &str, timeout: &str) -> Result<(), ForgeError> {
     check_non_blank(resource, &format!("stack {stack_name:?}: wait resource"))?;
     check_not_option_like(resource, &format!("stack {stack_name:?}: wait resource"))?;
     check_non_blank(condition, &format!("stack {stack_name:?}: wait condition"))?;
@@ -917,11 +854,7 @@ fn check_wait_step(
 }
 
 /// Validate an exec step.
-fn check_exec_step(
-    stack_name: &str,
-    command: &[String],
-    env: &BTreeMap<String, String>,
-) -> Result<(), ForgeError> {
+fn check_exec_step(stack_name: &str, command: &[String], env: &BTreeMap<String, String>) -> Result<(), ForgeError> {
     if command.is_empty() {
         return Err(ForgeError::Validation(format!(
             "stack {stack_name:?}: exec command must not be empty"
@@ -932,10 +865,7 @@ fn check_exec_step(
     }
     for (key, value) in env {
         check_exec_env_key(stack_name, key)?;
-        check_non_blank(
-            value,
-            &format!("stack {stack_name:?}: exec env value for {key:?}"),
-        )?;
+        check_non_blank(value, &format!("stack {stack_name:?}: exec env value for {key:?}"))?;
     }
     Ok(())
 }
@@ -952,15 +882,8 @@ fn check_exec_env_key(stack_name: &str, key: &str) -> Result<(), ForgeError> {
 }
 
 /// Validate a for-each step.
-fn check_for_each_step(
-    stack_name: &str,
-    property: &str,
-    steps: &[StepSpec],
-) -> Result<(), ForgeError> {
-    check_non_blank(
-        property,
-        &format!("stack {stack_name:?}: for-each property"),
-    )?;
+fn check_for_each_step(stack_name: &str, property: &str, steps: &[StepSpec]) -> Result<(), ForgeError> {
+    check_non_blank(property, &format!("stack {stack_name:?}: for-each property"))?;
     if steps.is_empty() {
         return Err(ForgeError::Validation(format!(
             "stack {stack_name:?}: for-each steps must not be empty"
@@ -975,9 +898,7 @@ fn check_for_each_step(
 /// Check a required text field.
 fn check_non_blank(value: &str, context: &str) -> Result<(), ForgeError> {
     if value.trim().is_empty() {
-        return Err(ForgeError::Validation(format!(
-            "{context}: must not be blank"
-        )));
+        return Err(ForgeError::Validation(format!("{context}: must not be blank")));
     }
     Ok(())
 }
@@ -1004,8 +925,7 @@ fn check_cluster_stack_refs(config: &ForgeConfig) -> Result<(), ForgeError> {
 fn check_no_templates(config: &ForgeConfig) -> Result<(), ForgeError> {
     let mut sanitized = config.clone();
     sanitized.spec.stacks.clear();
-    let yaml =
-        serde_yaml::to_string(&sanitized).map_err(|e| ForgeError::Validation(e.to_string()))?;
+    let yaml = serde_yaml::to_string(&sanitized).map_err(|err| ForgeError::Validation(err.to_string()))?;
     if yaml.contains("{{") && yaml.contains("}}") {
         return Err(ForgeError::Validation(
             "template syntax ({{ ... }}) is not supported outside \
@@ -1018,12 +938,7 @@ fn check_no_templates(config: &ForgeConfig) -> Result<(), ForgeError> {
 
 /// Validate `spec.network.dnsZone` when set.
 fn check_dns_zone(config: &ForgeConfig) -> Result<(), ForgeError> {
-    let Some(zone) = config
-        .spec
-        .network
-        .as_ref()
-        .and_then(|n| n.dns_zone.as_deref())
-    else {
+    let Some(zone) = config.spec.network.as_ref().and_then(|n| n.dns_zone.as_deref()) else {
         return Ok(());
     };
     validate_dns_zone_rules(zone)
@@ -1032,20 +947,17 @@ fn check_dns_zone(config: &ForgeConfig) -> Result<(), ForgeError> {
 /// DNS zone format rules: lowercase alphanumeric/hyphens/dots, at least one dot.
 fn validate_dns_zone_rules(zone: &str) -> Result<(), ForgeError> {
     if zone.is_empty() || zone.len() > 253 {
-        return Err(ForgeError::Validation(
-            "dnsZone must be 1-253 characters".to_owned(),
-        ));
+        return Err(ForgeError::Validation("dnsZone must be 1-253 characters".to_owned()));
     }
     if !zone
         .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-' || ch == b'.')
     {
         return Err(ForgeError::Validation(
             "dnsZone must contain only lowercase alphanumeric, hyphens, and dots".to_owned(),
         ));
     }
-    if zone.starts_with('.') || zone.starts_with('-') || zone.ends_with('.') || zone.ends_with('-')
-    {
+    if zone.starts_with('.') || zone.starts_with('-') || zone.ends_with('.') || zone.ends_with('-') {
         return Err(ForgeError::Validation(
             "dnsZone must not start or end with a dot or hyphen".to_owned(),
         ));
@@ -1060,11 +972,7 @@ fn validate_dns_zone_rules(zone: &str) -> Result<(), ForgeError> {
 
 /// Any `CoreDnsForward` step requires `spec.network.crossCluster: true`.
 fn check_coredns_requires_cross_cluster(config: &ForgeConfig) -> Result<(), ForgeError> {
-    let has_cross = config
-        .spec
-        .network
-        .as_ref()
-        .is_some_and(|n| n.cross_cluster);
+    let has_cross = config.spec.network.as_ref().is_some_and(|n| n.cross_cluster);
     if has_cross {
         return Ok(());
     }
@@ -1082,18 +990,13 @@ fn check_coredns_requires_cross_cluster(config: &ForgeConfig) -> Result<(), Forg
 
 /// Cross-cluster networking requires Docker; reject explicit Podman.
 fn check_cross_cluster_provider(config: &ForgeConfig) -> Result<(), ForgeError> {
-    let wants_cross = config
-        .spec
-        .network
-        .as_ref()
-        .is_some_and(|n| n.cross_cluster);
+    let wants_cross = config.spec.network.as_ref().is_some_and(|n| n.cross_cluster);
     if !wants_cross {
         return Ok(());
     }
     if config.spec.runtime.provider == RuntimeProvider::Podman {
         return Err(ForgeError::Validation(
-            "cross-cluster networking requires Docker; Podman is not supported in this phase"
-                .to_owned(),
+            "cross-cluster networking requires Docker; Podman is not supported in this phase".to_owned(),
         ));
     }
     Ok(())
@@ -1103,13 +1006,10 @@ fn check_cross_cluster_provider(config: &ForgeConfig) -> Result<(), ForgeError> 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::config::{
-        API_VERSION, ClusterSpec, EnvironmentSpec, ForgeConfig, HealthCheck, HealthCheckType, KIND,
-        Metadata, NetworkConfig, NetworkMode, NodeConfig, PortMapping, RestartPolicy,
-        RuntimeConfig, RuntimeProvider, ServiceSpec, StackSpec, StepSpec, VolumeMount,
+        ClusterSpec, EnvironmentSpec, HealthCheckType, Metadata, NetworkConfig, NodeConfig, PortMapping, RestartPolicy,
+        RuntimeConfig, StackSpec, VolumeMount,
     };
 
     /// Build a minimal valid config for test modification.
@@ -1172,10 +1072,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("apiVersion"),
-            "expected apiVersion error, got: {msg}"
-        );
+        assert!(msg.contains("apiVersion"), "expected apiVersion error, got: {msg}");
     }
 
     #[test]
@@ -1197,10 +1094,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("empty"),
-            "expected empty name error, got: {msg}"
-        );
+        assert!(msg.contains("empty"), "expected empty name error, got: {msg}");
     }
 
     #[test]
@@ -1211,10 +1105,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("invalid characters"),
-            "expected DNS error, got: {msg}"
-        );
+        assert!(msg.contains("invalid characters"), "expected DNS error, got: {msg}");
     }
 
     #[test]
@@ -1283,10 +1174,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("template syntax"),
-            "expected template error, got: {msg}"
-        );
+        assert!(msg.contains("template syntax"), "expected template error, got: {msg}");
     }
 
     #[test]
@@ -1307,10 +1195,7 @@ mod tests {
             stacks: vec!["base".to_owned()],
             properties: BTreeMap::new(),
         }];
-        assert!(
-            validate(&config).is_ok(),
-            "templates in stack steps should be allowed"
-        );
+        assert!(validate(&config).is_ok(), "templates in stack steps should be allowed");
     }
 
     #[test]
@@ -1366,10 +1251,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("protocol"),
-            "expected protocol error, got: {msg}"
-        );
+        assert!(msg.contains("protocol"), "expected protocol error, got: {msg}");
     }
 
     #[test]
@@ -1468,10 +1350,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("env key"),
-            "expected env key error, got: {msg}"
-        );
+        assert!(msg.contains("env key"), "expected env key error, got: {msg}");
     }
 
     #[test]
@@ -1491,10 +1370,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("exec command"),
-            "expected exec error, got: {msg}"
-        );
+        assert!(msg.contains("exec command"), "expected exec error, got: {msg}");
     }
 
     #[test]
@@ -1515,10 +1391,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("port"),
-            "expected service port error, got: {msg}"
-        );
+        assert!(msg.contains("port"), "expected service port error, got: {msg}");
     }
 
     #[test]
@@ -1540,10 +1413,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("timeout"),
-            "expected wait timeout error, got: {msg}"
-        );
+        assert!(msg.contains("timeout"), "expected wait timeout error, got: {msg}");
     }
 
     #[test]
@@ -1663,10 +1533,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("depends on itself"),
-            "expected self-dep error, got: {msg}"
-        );
+        assert!(msg.contains("depends on itself"), "expected self-dep error, got: {msg}");
     }
 
     #[test]
@@ -1688,11 +1555,11 @@ spec:
     #[test]
     fn service_dependency_cycle_rejected() {
         let mut config = base_config();
-        let mut a = test_service("a");
-        a.depends_on = vec!["b".to_owned()];
-        let mut b = test_service("b");
-        b.depends_on = vec!["a".to_owned()];
-        config.spec.services = vec![a, b];
+        let mut svc_a = test_service("a");
+        svc_a.depends_on = vec!["b".to_owned()];
+        let mut svc_b = test_service("b");
+        svc_b.depends_on = vec!["a".to_owned()];
+        config.spec.services = vec![svc_a, svc_b];
         let Err(err) = validate(&config) else {
             std::process::abort();
         };
@@ -1745,10 +1612,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("bind address"),
-            "expected bind address error, got: {msg}"
-        );
+        assert!(msg.contains("bind address"), "expected bind address error, got: {msg}");
     }
 
     #[test]
@@ -1826,10 +1690,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("duplicate"),
-            "expected duplicate port error, got: {msg}"
-        );
+        assert!(msg.contains("duplicate"), "expected duplicate port error, got: {msg}");
     }
 
     #[test]
@@ -1846,10 +1707,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("escape"),
-            "expected path escape error, got: {msg}"
-        );
+        assert!(msg.contains("escape"), "expected path escape error, got: {msg}");
     }
 
     #[test]
@@ -1866,10 +1724,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("absolute"),
-            "expected absolute path error, got: {msg}"
-        );
+        assert!(msg.contains("absolute"), "expected absolute path error, got: {msg}");
     }
 
     #[test]
@@ -1909,10 +1764,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("environment key"),
-            "expected env key error, got: {msg}"
-        );
+        assert!(msg.contains("environment key"), "expected env key error, got: {msg}");
     }
 
     #[test]
@@ -1947,10 +1799,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("retries"),
-            "expected retries error, got: {msg}"
-        );
+        assert!(msg.contains("retries"), "expected retries error, got: {msg}");
     }
 
     #[test]
@@ -1969,10 +1818,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("interval"),
-            "expected interval error, got: {msg}"
-        );
+        assert!(msg.contains("interval"), "expected interval error, got: {msg}");
     }
 
     #[test]
@@ -2013,10 +1859,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("512"),
-            "expected image length error, got: {msg}"
-        );
+        assert!(msg.contains("512"), "expected image length error, got: {msg}");
     }
 
     #[test]
@@ -2039,10 +1882,7 @@ spec:
             cross_cluster: true,
             dns_zone: Some("forge.test".to_owned()),
         });
-        assert!(
-            validate(&config).is_ok(),
-            "forge.test should be a valid dns zone"
-        );
+        assert!(validate(&config).is_ok(), "forge.test should be a valid dns zone");
     }
 
     #[test]
@@ -2084,10 +1924,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("crossCluster"),
-            "should mention crossCluster: {msg}"
-        );
+        assert!(msg.contains("crossCluster"), "should mention crossCluster: {msg}");
     }
 
     #[test]
@@ -2111,10 +1948,7 @@ spec:
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("valid DNS zone"),
-            "should reject invalid zone: {msg}"
-        );
+        assert!(msg.contains("valid DNS zone"), "should reject invalid zone: {msg}");
     }
 
     #[test]
@@ -2171,7 +2005,7 @@ spec:
                     description: None,
                     steps: vec![StepSpec::CoreDnsForward {
                         zone: "forge.test".to_owned(),
-                        upstreams: upstreams.iter().map(|s| (*s).to_owned()).collect(),
+                        upstreams: upstreams.iter().map(|name| (*name).to_owned()).collect(),
                     }],
                 },
             );
@@ -2244,10 +2078,7 @@ spec:
                 }],
             },
         );
-        assert!(
-            validate(&config).is_err(),
-            "capture should reject blank resource"
-        );
+        assert!(validate(&config).is_err(), "capture should reject blank resource");
     }
 
     #[test]
@@ -2267,10 +2098,7 @@ spec:
                 }],
             },
         );
-        assert!(
-            validate(&config).is_err(),
-            "capture should reject blank jsonpath"
-        );
+        assert!(validate(&config).is_err(), "capture should reject blank jsonpath");
     }
 
     #[test]
@@ -2290,10 +2118,7 @@ spec:
                 }],
             },
         );
-        assert!(
-            validate(&config).is_err(),
-            "capture should reject key with dots"
-        );
+        assert!(validate(&config).is_err(), "capture should reject key with dots");
     }
 
     #[test]

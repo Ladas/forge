@@ -17,22 +17,14 @@ use crate::{
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn run(
-    config_path: &Path,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn run(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let config = config::load(config_path)?;
     validate::validate(&config)?;
     render_plan(&config, format, writer)
 }
 
 /// Render the plan summary.
-fn render_plan(
-    config: &config::ForgeConfig,
-    format: &OutputFormat,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn render_plan(config: &config::ForgeConfig, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => render_json(config, writer),
         OutputFormat::Text => render_text(config, writer),
@@ -64,7 +56,7 @@ fn render_clusters(config: &config::ForgeConfig, writer: &mut dyn Write) -> Resu
             &format!(
                 "  - {} ({} nodes, {} stacks)",
                 cluster.name,
-                cluster.nodes.control_planes + cluster.nodes.workers,
+                cluster.nodes.control_planes.saturating_add(cluster.nodes.workers),
                 cluster.stacks.len()
             ),
         )?;
@@ -85,10 +77,7 @@ fn render_services(config: &config::ForgeConfig, writer: &mut dyn Write) -> Resu
 fn render_stacks(config: &config::ForgeConfig, writer: &mut dyn Write) -> Result<(), ForgeError> {
     output::write_text(writer, &format!("Stacks: {}", config.spec.stacks.len()))?;
     for (name, stack) in &config.spec.stacks {
-        output::write_text(
-            writer,
-            &format!("  - {} ({} steps)", name, stack.steps.len()),
-        )?;
+        output::write_text(writer, &format!("  - {} ({} steps)", name, stack.steps.len()))?;
     }
     Ok(())
 }

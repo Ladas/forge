@@ -4,10 +4,7 @@
 //! verifying that configuration loading, validation, and CLI
 //! argument parsing work correctly end-to-end.
 
-#![allow(
-    clippy::tests_outside_test_module,
-    reason = "integration tests live in tests/"
-)]
+#![allow(clippy::tests_outside_test_module, reason = "integration tests live in tests/")]
 
 use clap::Parser as _;
 use forge::{
@@ -20,9 +17,9 @@ use forge::{
 fn cli_recognizes_help_flag() {
     let result = Cli::try_parse_from(["praxis-forge", "--help"]);
     assert!(result.is_err(), "--help should produce a help error");
-    if let Err(e) = result {
+    if let Err(err) = result {
         assert_eq!(
-            e.kind(),
+            err.kind(),
             clap::error::ErrorKind::DisplayHelp,
             "should produce help output"
         );
@@ -39,10 +36,7 @@ fn cli_accepts_global_options_after_subcommands() {
         "/tmp/forge.yaml",
         "--dry-run",
     ]);
-    assert!(
-        result.is_ok(),
-        "global options should be accepted after subcommands"
-    );
+    assert!(result.is_ok(), "global options should be accepted after subcommands");
 }
 
 #[test]
@@ -103,14 +97,13 @@ fn cli_accepts_up_with_dry_run() {
 
 #[test]
 fn cli_accepts_runtime_override() {
-    let cli =
-        Cli::try_parse_from(["praxis-forge", "--runtime", "podman", "up"]).unwrap_or_else(|_| {
-            std::process::abort();
-            #[expect(unreachable_code, reason = "abort prevents reaching this")]
-            {
-                unreachable!()
-            }
-        });
+    let cli = Cli::try_parse_from(["praxis-forge", "--runtime", "podman", "up"]).unwrap_or_else(|_| {
+        std::process::abort();
+        #[expect(unreachable_code, reason = "abort prevents reaching this")]
+        {
+            unreachable!()
+        }
+    });
     assert_eq!(
         cli.global.runtime,
         Some(RuntimeProvider::Podman),
@@ -153,14 +146,13 @@ fn cli_accepts_status_with_json_flag() {
 
 #[test]
 fn cli_accepts_status_with_global_output_json() {
-    let cli =
-        Cli::try_parse_from(["praxis-forge", "--output", "json", "status"]).unwrap_or_else(|_| {
-            std::process::abort();
-            #[expect(unreachable_code, reason = "abort prevents reaching this")]
-            {
-                unreachable!()
-            }
-        });
+    let cli = Cli::try_parse_from(["praxis-forge", "--output", "json", "status"]).unwrap_or_else(|_| {
+        std::process::abort();
+        #[expect(unreachable_code, reason = "abort prevents reaching this")]
+        {
+            unreachable!()
+        }
+    });
     assert_eq!(
         cli.global.output,
         forge::output::OutputFormat::Json,
@@ -177,10 +169,7 @@ fn cli_accepts_cluster_create() {
 #[test]
 fn cli_accepts_cluster_delete_with_force() {
     let result = Cli::try_parse_from(["praxis-forge", "cluster", "delete", "hub", "--force"]);
-    assert!(
-        result.is_ok(),
-        "cluster delete --force should parse: {result:?}"
-    );
+    assert!(result.is_ok(), "cluster delete --force should parse: {result:?}");
 }
 
 #[test]
@@ -192,38 +181,18 @@ fn cli_accepts_cluster_list() {
 #[test]
 fn cli_accepts_cluster_kubeconfig() {
     let result = Cli::try_parse_from(["praxis-forge", "cluster", "kubeconfig", "hub"]);
-    assert!(
-        result.is_ok(),
-        "cluster kubeconfig should parse: {result:?}"
-    );
+    assert!(result.is_ok(), "cluster kubeconfig should parse: {result:?}");
 }
 
 #[test]
 fn cli_accepts_cluster_load_image() {
-    let result = Cli::try_parse_from([
-        "praxis-forge",
-        "cluster",
-        "load-image",
-        "hub",
-        "my-image:v1",
-    ]);
-    assert!(
-        result.is_ok(),
-        "cluster load-image should parse: {result:?}"
-    );
+    let result = Cli::try_parse_from(["praxis-forge", "cluster", "load-image", "hub", "my-image:v1"]);
+    assert!(result.is_ok(), "cluster load-image should parse: {result:?}");
 }
 
 #[test]
 fn cli_accepts_cluster_kubectl() {
-    let result = Cli::try_parse_from([
-        "praxis-forge",
-        "cluster",
-        "kubectl",
-        "hub",
-        "--",
-        "get",
-        "pods",
-    ]);
+    let result = Cli::try_parse_from(["praxis-forge", "cluster", "kubectl", "hub", "--", "get", "pods"]);
     assert!(result.is_ok(), "cluster kubectl should parse: {result:?}");
 }
 
@@ -258,10 +227,7 @@ fn cli_accepts_service_logs() {
 #[test]
 fn cli_accepts_service_logs_with_tail() {
     let result = Cli::try_parse_from(["praxis-forge", "service", "logs", "edge", "--tail", "100"]);
-    assert!(
-        result.is_ok(),
-        "service logs --tail should parse: {result:?}"
-    );
+    assert!(result.is_ok(), "service logs --tail should parse: {result:?}");
 }
 
 // ---------------------------------------------------------------
@@ -277,10 +243,7 @@ fn cli_accepts_top_level_apply() {
 #[test]
 fn cli_accepts_top_level_apply_with_stack() {
     let result = Cli::try_parse_from(["praxis-forge", "apply", "hub", "base"]);
-    assert!(
-        result.is_ok(),
-        "top-level apply with stack should parse: {result:?}"
-    );
+    assert!(result.is_ok(), "top-level apply with stack should parse: {result:?}");
 }
 
 // ---------------------------------------------------------------
@@ -302,10 +265,7 @@ fn cli_accepts_stack_plan() {
 #[test]
 fn cli_accepts_stack_apply_with_filter() {
     let result = Cli::try_parse_from(["praxis-forge", "stack", "apply", "hub", "base"]);
-    assert!(
-        result.is_ok(),
-        "stack apply with filter should parse: {result:?}"
-    );
+    assert!(result.is_ok(), "stack apply with filter should parse: {result:?}");
 }
 
 #[test]

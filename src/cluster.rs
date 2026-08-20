@@ -22,18 +22,12 @@ use crate::{
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn dispatch(
-    ctx: &ForgeContext<'_>,
-    cmd: &ClusterCommand,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn dispatch(ctx: &ForgeContext<'_>, cmd: &ClusterCommand, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match cmd {
         ClusterCommand::Create { name } => handle_create(ctx, name, writer),
         ClusterCommand::Delete { name, force } => handle_delete(ctx, name, *force, writer),
         ClusterCommand::List => handle_list(ctx, writer),
-        ClusterCommand::Kubeconfig { name, out_file } => {
-            handle_kubeconfig(ctx, name, out_file, writer)
-        }
+        ClusterCommand::Kubeconfig { name, out_file } => handle_kubeconfig(ctx, name, out_file.as_ref(), writer),
         ClusterCommand::LoadImage { name, image } => handle_load_image(ctx, name, image, writer),
         ClusterCommand::Kubectl { name, args } => handle_kubectl(ctx, name, args, writer),
     }
@@ -44,21 +38,11 @@ pub fn dispatch(
 // ---------------------------------------------------------------
 
 /// Handle `cluster create`.
-fn handle_create(
-    ctx: &ForgeContext<'_>,
-    name: &str,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn handle_create(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let cluster = lookup_cluster(ctx, name)?;
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
-        return report_dry_run(
-            writer,
-            "would create cluster",
-            name,
-            &kind_name,
-            &ctx.format,
-        );
+        return report_dry_run(writer, "would create cluster", name, &kind_name, &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut state = state::load(&ctx.state_dir)?;
@@ -68,21 +52,10 @@ fn handle_create(
 }
 
 /// Handle `cluster delete`.
-fn handle_delete(
-    ctx: &ForgeContext<'_>,
-    name: &str,
-    _force: bool,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn handle_delete(ctx: &ForgeContext<'_>, name: &str, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
-        return report_dry_run(
-            writer,
-            "would delete cluster",
-            name,
-            &kind_name,
-            &ctx.format,
-        );
+        return report_dry_run(writer, "would delete cluster", name, &kind_name, &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     kind_ops::delete_cluster(ctx.runner, &kind_name)?;
@@ -100,7 +73,7 @@ fn handle_list(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), For
 fn handle_kubeconfig(
     ctx: &ForgeContext<'_>,
     name: &str,
-    output_path: &Option<std::path::PathBuf>,
+    output_path: Option<&std::path::PathBuf>,
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
@@ -117,13 +90,7 @@ fn handle_load_image(
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
-        return report_dry_run(
-            writer,
-            "would load image into cluster",
-            name,
-            &kind_name,
-            &ctx.format,
-        );
+        return report_dry_run(writer, "would load image into cluster", name, &kind_name, &ctx.format);
     }
     kind_ops::load_image(ctx.runner, &kind_name, image)?;
     report_image_loaded(writer, name, image, &ctx.format)
@@ -147,15 +114,15 @@ fn handle_kubectl(
 // ---------------------------------------------------------------
 
 /// Look up a cluster in the config by name.
-fn lookup_cluster<'a>(
-    ctx: &'a ForgeContext<'_>,
+fn lookup_cluster<'cfg>(
+    ctx: &'cfg ForgeContext<'_>,
     name: &str,
-) -> Result<&'a crate::config::ClusterSpec, ForgeError> {
+) -> Result<&'cfg crate::config::ClusterSpec, ForgeError> {
     ctx.config
         .spec
         .clusters
         .iter()
-        .find(|c| c.name == name)
+        .find(|cl| cl.name == name)
         .ok_or_else(|| ForgeError::Config(format!("cluster '{name}' not found in config")))
 }
 
@@ -181,12 +148,7 @@ fn create_if_missing(
 }
 
 /// Insert or update a cluster's state entry.
-fn upsert_cluster_state(
-    st: &mut state::ForgeState,
-    name: &str,
-    kind_name: &str,
-    phase: ClusterPhase,
-) {
+fn upsert_cluster_state(st: &mut state::ForgeState, name: &str, kind_name: &str, phase: ClusterPhase) {
     if let Some(cs) = state::find_cluster_mut(st, name) {
         cs.phase = phase;
         return;
@@ -211,17 +173,13 @@ fn update_phase_gone(ctx: &ForgeContext<'_>, name: &str) -> Result<(), ForgeErro
 /// Write kubeconfig to file or writer.
 fn write_kubeconfig(
     writer: &mut dyn Write,
-    output_path: &Option<std::path::PathBuf>,
+    output_path: Option<&std::path::PathBuf>,
     kubeconfig: &str,
     format: &OutputFormat,
 ) -> Result<(), ForgeError> {
     if let Some(path) = output_path {
         std::fs::write(path, kubeconfig).map_err(ForgeError::Io)?;
-        return report_text_or_json(
-            writer,
-            &format!("kubeconfig written to {}", path.display()),
-            format,
-        );
+        return report_text_or_json(writer, &format!("kubeconfig written to {}", path.display()), format);
     }
     output::write_text(writer, kubeconfig)?;
     Ok(())
@@ -277,39 +235,31 @@ fn report_image_loaded(
 }
 
 /// Render a cluster list.
-fn render_list(
-    writer: &mut dyn Write,
-    clusters: &[String],
-    format: &OutputFormat,
-) -> Result<(), ForgeError> {
+fn render_list(writer: &mut dyn Write, clusters: &[String], format: &OutputFormat) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => {
             let envelope = output::success(serde_json::json!({ "clusters": clusters }));
             output::write_json(writer, &envelope)?;
-        }
+        },
         OutputFormat::Text => {
-            for c in clusters {
-                output::write_text(writer, c)?;
+            for name in clusters {
+                output::write_text(writer, name)?;
             }
-        }
+        },
     }
     Ok(())
 }
 
 /// Write a message as text or JSON envelope.
-fn report_text_or_json(
-    writer: &mut dyn Write,
-    message: &str,
-    format: &OutputFormat,
-) -> Result<(), ForgeError> {
+fn report_text_or_json(writer: &mut dyn Write, message: &str, format: &OutputFormat) -> Result<(), ForgeError> {
     match format {
         OutputFormat::Json => {
             let envelope = output::success(serde_json::json!({ "message": message }));
             output::write_json(writer, &envelope)?;
-        }
+        },
         OutputFormat::Text => {
             output::write_text(writer, message)?;
-        }
+        },
     }
     Ok(())
 }

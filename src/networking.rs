@@ -94,11 +94,7 @@ pub fn remove_network(
 ///
 /// Returns [`ForgeError`] if the runtime binary cannot execute, or if the
 /// inspect fails for any reason other than the network being absent.
-pub fn network_exists(
-    runner: &dyn CommandRunner,
-    binary: &str,
-    net_name: &str,
-) -> Result<bool, ForgeError> {
+pub fn network_exists(runner: &dyn CommandRunner, binary: &str, net_name: &str) -> Result<bool, ForgeError> {
     let spec = inspect_spec(binary, net_name);
     let output = runner.run(&spec)?;
     if output.status == 0 {
@@ -140,11 +136,7 @@ fn is_absent_error(stderr: &str) -> bool {
 ///
 /// Returns [`ForgeError`] if the inspect command fails or the network does
 /// not expose a valid IPv4 subnet.
-pub fn inspect_network_cidr(
-    runner: &dyn CommandRunner,
-    binary: &str,
-    net_name: &str,
-) -> Result<String, ForgeError> {
+pub fn inspect_network_cidr(runner: &dyn CommandRunner, binary: &str, net_name: &str) -> Result<String, ForgeError> {
     let spec = cidr_spec(binary, net_name);
     let output = runner.run(&spec)?;
     check_success(&output, "network inspect")?;
@@ -180,24 +172,17 @@ fn inspect_labels(
 }
 
 /// Verify a single label value matches the expected value.
-fn check_label(
-    labels: &BTreeMap<String, String>,
-    key: &str,
-    expected: &str,
-    net_name: &str,
-) -> Result<(), ForgeError> {
+fn check_label(labels: &BTreeMap<String, String>, key: &str, expected: &str, net_name: &str) -> Result<(), ForgeError> {
     match labels.get(key) {
-        Some(v) if v == expected => Ok(()),
-        Some(v) => Err(ownership_mismatch(net_name, key, expected, v)),
+        Some(val) if val == expected => Ok(()),
+        Some(val) => Err(ownership_mismatch(net_name, key, expected, val)),
         None => Err(missing_label(net_name, key)),
     }
 }
 
 /// Build an error for a mismatched ownership label.
 fn ownership_mismatch(net_name: &str, key: &str, expected: &str, actual: &str) -> ForgeError {
-    ForgeError::State(format!(
-        "network '{net_name}' has {key}={actual}, expected {expected}"
-    ))
+    ForgeError::State(format!("network '{net_name}' has {key}={actual}, expected {expected}"))
 }
 
 /// Build an error for a missing ownership label.
@@ -296,14 +281,13 @@ fn parse_labels(stdout: &str) -> Result<BTreeMap<String, String>, ForgeError> {
     if trimmed.is_empty() {
         return Ok(BTreeMap::new());
     }
-    serde_json::from_str(trimmed)
-        .map_err(|e| ForgeError::State(format!("cannot parse network labels: {e}")))
+    serde_json::from_str(trimmed).map_err(|err| ForgeError::State(format!("cannot parse network labels: {err}")))
 }
 
 /// Parse and validate the first IPv4 subnet in a formatted IPAM config.
 fn parse_ipam_config(stdout: &str) -> Result<String, ForgeError> {
     let config: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())
-        .map_err(|e| ForgeError::State(format!("cannot parse network IPAM config: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("cannot parse network IPAM config: {err}")))?;
     let subnet = config
         .first()
         .and_then(|entry| entry.get("Subnet"))
@@ -318,12 +302,12 @@ fn validate_ipv4_cidr(cidr: &str) -> Result<(), ForgeError> {
     let (address, prefix) = cidr
         .split_once('/')
         .ok_or_else(|| ForgeError::State(format!("network subnet is not CIDR: {cidr:?}")))?;
-    address.parse::<std::net::Ipv4Addr>().map_err(|e| {
-        ForgeError::State(format!("network subnet has an invalid IPv4 address: {e}"))
-    })?;
+    address
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|err| ForgeError::State(format!("network subnet has an invalid IPv4 address: {err}")))?;
     let prefix = prefix
         .parse::<u8>()
-        .map_err(|e| ForgeError::State(format!("network subnet has an invalid prefix: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("network subnet has an invalid prefix: {err}")))?;
     if prefix > 32 {
         return Err(ForgeError::State(format!(
             "network subnet prefix /{prefix} exceeds /32"
@@ -405,20 +389,10 @@ mod tests {
         runner.respond("docker network inspect test-net", not_found());
         runner.respond("docker", ok());
 
-        create_network(&runner, "docker", "test-net", "test")
-            .unwrap_or_else(|_| std::process::abort());
-        assert!(
-            runner.was_called("network create"),
-            "should call network create"
-        );
-        assert!(
-            runner.was_called("forge.managed=true"),
-            "should include managed label"
-        );
-        assert!(
-            runner.was_called("forge.environment=test"),
-            "should include env label"
-        );
+        create_network(&runner, "docker", "test-net", "test").unwrap_or_else(|_| std::process::abort());
+        assert!(runner.was_called("network create"), "should call network create");
+        assert!(runner.was_called("forge.managed=true"), "should include managed label");
+        assert!(runner.was_called("forge.environment=test"), "should include env label");
     }
 
     #[test]
@@ -430,8 +404,7 @@ mod tests {
             owned_labels("test"),
         );
 
-        create_network(&runner, "docker", "test-net", "test")
-            .unwrap_or_else(|_| std::process::abort());
+        create_network(&runner, "docker", "test-net", "test").unwrap_or_else(|_| std::process::abort());
         assert!(
             !runner.was_called("network create"),
             "should not create existing network"
@@ -481,8 +454,7 @@ mod tests {
         );
         runner.respond("docker network rm test-net", ok());
 
-        remove_network(&runner, "docker", "test-net", "test")
-            .unwrap_or_else(|_| std::process::abort());
+        remove_network(&runner, "docker", "test-net", "test").unwrap_or_else(|_| std::process::abort());
         assert!(runner.was_called("network rm"), "should call network rm");
     }
 
@@ -491,8 +463,7 @@ mod tests {
         let mut runner = MockRunner::new();
         runner.respond("docker network inspect test-net", not_found());
 
-        remove_network(&runner, "docker", "test-net", "test")
-            .unwrap_or_else(|_| std::process::abort());
+        remove_network(&runner, "docker", "test-net", "test").unwrap_or_else(|_| std::process::abort());
         assert!(
             !runner.was_called("network rm"),
             "should not call rm on missing network"
@@ -523,10 +494,7 @@ mod tests {
 
         let result = remove_network(&runner, "docker", "test-net", "test");
         assert!(result.is_err(), "should reject unmanaged network on remove");
-        assert!(
-            !runner.was_called("network rm"),
-            "must not remove unmanaged network"
-        );
+        assert!(!runner.was_called("network rm"), "must not remove unmanaged network");
     }
 
     #[test]
@@ -623,8 +591,7 @@ mod tests {
             ipam_config("172.18.0.0/16"),
         );
 
-        let cidr = inspect_network_cidr(&runner, "docker", "test-net")
-            .unwrap_or_else(|_| std::process::abort());
+        let cidr = inspect_network_cidr(&runner, "docker", "test-net").unwrap_or_else(|_| std::process::abort());
         assert_eq!(cidr, "172.18.0.0/16");
     }
 
@@ -682,8 +649,7 @@ mod tests {
         runner.respond("podman network inspect test-net", not_found());
         runner.respond("podman", ok());
 
-        create_network(&runner, "podman", "test-net", "test")
-            .unwrap_or_else(|_| std::process::abort());
+        create_network(&runner, "podman", "test-net", "test").unwrap_or_else(|_| std::process::abort());
         assert!(runner.was_called("podman"), "should use podman binary");
     }
 }

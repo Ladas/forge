@@ -26,10 +26,7 @@ pub struct ResolvedRuntime {
 ///
 /// Returns [`ForgeError::Runtime`] if the requested runtime is not
 /// available, or if auto-detection finds neither Docker nor Podman.
-pub fn resolve(
-    runner: &dyn CommandRunner,
-    requested: &RuntimeProvider,
-) -> Result<ResolvedRuntime, ForgeError> {
+pub fn resolve(runner: &dyn CommandRunner, requested: &RuntimeProvider) -> Result<ResolvedRuntime, ForgeError> {
     match requested {
         RuntimeProvider::Docker => require_docker(runner),
         RuntimeProvider::Podman => require_podman(runner),
@@ -42,8 +39,7 @@ fn auto_detect(runner: &dyn CommandRunner) -> Result<ResolvedRuntime, ForgeError
     if let Some(rt) = probe_docker(runner) {
         return Ok(rt);
     }
-    probe_podman(runner)
-        .ok_or_else(|| ForgeError::Runtime("neither docker nor podman found".to_owned()))
+    probe_podman(runner).ok_or_else(|| ForgeError::Runtime("neither docker nor podman found".to_owned()))
 }
 
 /// Require Docker to be available.
@@ -67,11 +63,7 @@ fn probe_podman(runner: &dyn CommandRunner) -> Option<ResolvedRuntime> {
 }
 
 /// Probe a runtime by running `<program> version`.
-fn probe_runtime(
-    runner: &dyn CommandRunner,
-    program: &str,
-    provider: RuntimeProvider,
-) -> Option<ResolvedRuntime> {
+fn probe_runtime(runner: &dyn CommandRunner, program: &str, provider: RuntimeProvider) -> Option<ResolvedRuntime> {
     let spec = version_spec(program);
     match runner.run(&spec) {
         Ok(out) if out.status == 0 => Some(ResolvedRuntime {
@@ -135,11 +127,7 @@ mod tests {
                 unreachable!()
             }
         });
-        assert_eq!(
-            rt.provider,
-            RuntimeProvider::Podman,
-            "should fall back to podman"
-        );
+        assert_eq!(rt.provider, RuntimeProvider::Podman, "should fall back to podman");
     }
 
     #[test]

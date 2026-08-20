@@ -32,19 +32,11 @@ use crate::{
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn dispatch(
-    ctx: &ForgeContext<'_>,
-    cmd: &StackCommand,
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+pub fn dispatch(ctx: &ForgeContext<'_>, cmd: &StackCommand, writer: &mut dyn Write) -> Result<(), ForgeError> {
     match cmd {
         StackCommand::List => handle_list(ctx, writer),
-        StackCommand::Plan { cluster, stack } => {
-            handle_plan(ctx, cluster, stack.as_deref(), writer)
-        }
-        StackCommand::Apply { cluster, stack } => {
-            handle_apply(ctx, cluster, stack.as_deref(), writer)
-        }
+        StackCommand::Plan { cluster, stack } => handle_plan(ctx, cluster, stack.as_deref(), writer),
+        StackCommand::Apply { cluster, stack } => handle_apply(ctx, cluster, stack.as_deref(), writer),
         StackCommand::Status { cluster } => handle_status(ctx, cluster.as_deref(), writer),
     }
 }
@@ -133,8 +125,8 @@ fn apply_stacks(
     let mut st = state::load(&ctx.state_dir)?;
     let mut results = Vec::new();
     for (name, spec) in stacks {
-        let r = apply_one(ctx, cluster, name, spec, &mut st);
-        results.push(r);
+        let result = apply_one(ctx, cluster, name, spec, &mut st);
+        results.push(result);
     }
     state::save(&ctx.state_dir, &st)?;
     Ok(results)
@@ -149,36 +141,24 @@ fn apply_one(
     st: &mut state::ForgeState,
 ) -> ApplyResult {
     let digest = stack_digest(spec).ok();
-    upsert_stack_state(
-        st,
-        name,
-        &cluster.name,
-        StackPhase::Applying,
-        digest.as_deref(),
-    );
+    upsert_stack_state(st, name, &cluster.name, StackPhase::Applying, digest.as_deref());
     let network = build_network_params(ctx, cluster, st);
     match engine::apply_stack(ctx, cluster, name, spec, network.as_ref(), &st.captures) {
-        Ok(r) => {
-            if let Some(alloc) = &r.pool_allocation {
+        Ok(outcome) => {
+            if let Some(alloc) = &outcome.pool_allocation {
                 record_pool_allocation(st, &cluster.name, alloc);
             }
-            record_captures(st, &cluster.name, &r.captures);
-            upsert_stack_state(
-                st,
-                name,
-                &cluster.name,
-                StackPhase::Applied,
-                digest.as_deref(),
-            );
+            record_captures(st, &cluster.name, &outcome.captures);
+            upsert_stack_state(st, name, &cluster.name, StackPhase::Applied, digest.as_deref());
             ApplyResult {
                 name: name.to_owned(),
-                steps_executed: r.steps_executed,
+                steps_executed: outcome.steps_executed,
                 success: true,
                 error: None,
             }
-        }
-        Err(e) => {
-            let message = e.to_string();
+        },
+        Err(err) => {
+            let message = err.to_string();
             set_stack_failed(st, name, &cluster.name, digest.as_deref(), &message);
             ApplyResult {
                 name: name.to_owned(),
@@ -186,7 +166,7 @@ fn apply_one(
                 success: false,
                 error: Some(message),
             }
-        }
+        },
     }
 }
 
@@ -207,24 +187,21 @@ fn ensure_apply_success(cluster: &str, results: &[ApplyResult]) -> Result<(), Fo
 // -------------------------------------------------------------
 
 /// Find a cluster in the config by name.
-fn lookup_cluster<'a>(
-    ctx: &'a ForgeContext<'_>,
-    name: &str,
-) -> Result<&'a ClusterSpec, ForgeError> {
+fn lookup_cluster<'ctx>(ctx: &'ctx ForgeContext<'_>, name: &str) -> Result<&'ctx ClusterSpec, ForgeError> {
     ctx.config
         .spec
         .clusters
         .iter()
-        .find(|c| c.name == name)
+        .find(|cluster| cluster.name == name)
         .ok_or_else(|| ForgeError::Config(format!("cluster '{name}' not found")))
 }
 
 /// Resolve which stacks to apply for a cluster.
-fn resolve_stacks<'a>(
-    ctx: &'a ForgeContext<'_>,
+fn resolve_stacks<'ctx>(
+    ctx: &'ctx ForgeContext<'_>,
     cluster: &ClusterSpec,
     stack_filter: Option<&str>,
-) -> Result<Vec<(&'a str, &'a StackSpec)>, ForgeError> {
+) -> Result<Vec<(&'ctx str, &'ctx StackSpec)>, ForgeError> {
     if let Some(name) = stack_filter {
         let entry = lookup_stack_entry(ctx, name)?;
         return Ok(vec![entry]);
@@ -233,10 +210,10 @@ fn resolve_stacks<'a>(
 }
 
 /// Resolve all stacks assigned to a cluster.
-fn resolve_cluster_stacks<'a>(
-    ctx: &'a ForgeContext<'_>,
+fn resolve_cluster_stacks<'ctx>(
+    ctx: &'ctx ForgeContext<'_>,
     cluster: &ClusterSpec,
-) -> Result<Vec<(&'a str, &'a StackSpec)>, ForgeError> {
+) -> Result<Vec<(&'ctx str, &'ctx StackSpec)>, ForgeError> {
     let mut result = Vec::new();
     for name in &cluster.stacks {
         result.push(lookup_stack_entry(ctx, name)?);
@@ -245,15 +222,15 @@ fn resolve_cluster_stacks<'a>(
 }
 
 /// Find a stack entry (key+value) in the config.
-fn lookup_stack_entry<'a>(
-    ctx: &'a ForgeContext<'_>,
+fn lookup_stack_entry<'ctx>(
+    ctx: &'ctx ForgeContext<'_>,
     name: &str,
-) -> Result<(&'a str, &'a StackSpec), ForgeError> {
+) -> Result<(&'ctx str, &'ctx StackSpec), ForgeError> {
     ctx.config
         .spec
         .stacks
         .get_key_value(name)
-        .map(|(k, v)| (k.as_str(), v))
+        .map(|(key, val)| (key.as_str(), val))
         .ok_or_else(|| ForgeError::Config(format!("stack '{name}' not found")))
 }
 
@@ -262,13 +239,7 @@ fn lookup_stack_entry<'a>(
 // -------------------------------------------------------------
 
 /// Insert or update a stack state entry.
-fn upsert_stack_state(
-    st: &mut state::ForgeState,
-    name: &str,
-    cluster: &str,
-    phase: StackPhase,
-    digest: Option<&str>,
-) {
+fn upsert_stack_state(st: &mut state::ForgeState, name: &str, cluster: &str, phase: StackPhase, digest: Option<&str>) {
     if let Some(existing) = state::find_stack_mut(st, name, cluster) {
         existing.phase = phase;
         existing.digest = digest.map(str::to_owned);
@@ -287,13 +258,7 @@ fn upsert_stack_state(
 }
 
 /// Mark a stack as failed with an error message.
-fn set_stack_failed(
-    st: &mut state::ForgeState,
-    name: &str,
-    cluster: &str,
-    digest: Option<&str>,
-    message: &str,
-) {
+fn set_stack_failed(st: &mut state::ForgeState, name: &str, cluster: &str, digest: Option<&str>, message: &str) {
     if let Some(existing) = state::find_stack_mut(st, name, cluster) {
         existing.phase = StackPhase::Failed;
         existing.digest = digest.map(str::to_owned);
@@ -314,19 +279,16 @@ fn set_stack_failed(
 /// Compute a stable digest for the stack spec being applied.
 fn stack_digest(spec: &StackSpec) -> Result<String, ForgeError> {
     let json = serde_json::to_string(spec)
-        .map_err(|e| ForgeError::State(format!("cannot serialize stack spec for digest: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("cannot serialize stack spec for digest: {err}")))?;
     let hash = sha2::Sha256::digest(json.as_bytes());
     Ok(format!("{hash:x}"))
 }
 
 /// Filter stack states by optional cluster name.
-fn filter_stack_states<'a>(
-    st: &'a state::ForgeState,
-    cluster: Option<&str>,
-) -> Vec<&'a StackState> {
+fn filter_stack_states<'st>(st: &'st state::ForgeState, cluster: Option<&str>) -> Vec<&'st StackState> {
     st.stacks
         .iter()
-        .filter(|s| cluster.is_none_or(|c| s.cluster == c))
+        .filter(|stack| cluster.is_none_or(|name| stack.cluster == name))
         .collect()
 }
 
@@ -335,17 +297,12 @@ fn filter_stack_states<'a>(
 // -------------------------------------------------------------
 
 /// Build [`engine::NetworkParams`] when cross-cluster networking is enabled.
-fn build_network_params<'a>(
-    ctx: &'a ForgeContext<'_>,
+fn build_network_params<'env>(
+    ctx: &'env ForgeContext<'_>,
     cluster: &ClusterSpec,
-    st: &'a state::ForgeState,
-) -> Option<engine::NetworkParams<'a>> {
-    let net_cfg = ctx
-        .config
-        .spec
-        .network
-        .as_ref()
-        .filter(|n| n.cross_cluster)?;
+    st: &'env state::ForgeState,
+) -> Option<engine::NetworkParams<'env>> {
+    let net_cfg = ctx.config.spec.network.as_ref().filter(|net| net.cross_cluster)?;
     let idx = cluster_index(ctx, &cluster.name);
     Some(engine::NetworkParams {
         cluster_pool: state::find_cluster_pool(st, &cluster.name),
@@ -361,22 +318,18 @@ fn cluster_index(ctx: &ForgeContext<'_>, name: &str) -> usize {
         .spec
         .clusters
         .iter()
-        .position(|c| c.name == name)
+        .position(|cluster| cluster.name == name)
         .unwrap_or(0)
 }
 
 /// Record a newly computed pool allocation in state.
-fn record_pool_allocation(
-    st: &mut state::ForgeState,
-    cluster: &str,
-    alloc: &engine::PoolAllocation,
-) {
+fn record_pool_allocation(st: &mut state::ForgeState, cluster: &str, alloc: &engine::PoolAllocation) {
     if let Some(ref mut net) = st.network {
         if net.cidr.as_deref() != Some(&alloc.cidr) {
             net.cidr = Some(alloc.cidr.clone());
             net.cluster_pools.clear();
         }
-        if let Some(existing) = net.cluster_pools.iter_mut().find(|p| p.cluster == cluster) {
+        if let Some(existing) = net.cluster_pools.iter_mut().find(|pool| pool.cluster == cluster) {
             alloc.range.clone_into(&mut existing.range);
         } else {
             net.cluster_pools.push(ClusterPool {
@@ -388,11 +341,7 @@ fn record_pool_allocation(
 }
 
 /// Merge captured values from a stack apply into persisted state.
-fn record_captures(
-    st: &mut state::ForgeState,
-    cluster: &str,
-    captures: &std::collections::BTreeMap<String, String>,
-) {
+fn record_captures(st: &mut state::ForgeState, cluster: &str, captures: &std::collections::BTreeMap<String, String>) {
     if captures.is_empty() {
         return;
     }
@@ -492,12 +441,9 @@ fn render_plan_text(
 }
 
 /// Render step list for plan text output.
-fn render_plan_steps(
-    steps_list: &[crate::config::StepSpec],
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
-    for (i, step) in steps_list.iter().enumerate() {
-        let idx = i.saturating_add(1);
+fn render_plan_steps(steps_list: &[crate::config::StepSpec], writer: &mut dyn Write) -> Result<(), ForgeError> {
+    for (idx, step) in steps_list.iter().enumerate() {
+        let idx = idx.saturating_add(1);
         let label = step_type_label(step);
         let desc = step_description(step);
         output::write_text(writer, &format!("  {idx}. [{label}] {desc}"))?;
@@ -526,11 +472,7 @@ fn render_apply(
 }
 
 /// Render apply results as JSON.
-fn render_apply_json(
-    cluster: &str,
-    results: &[ApplyResult],
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
+fn render_apply_json(cluster: &str, results: &[ApplyResult], writer: &mut dyn Write) -> Result<(), ForgeError> {
     let entries: Vec<serde_json::Value> = results.iter().map(apply_entry).collect();
     let data = serde_json::json!({ "cluster": cluster, "stacks": entries });
     let result = output::success(data);
@@ -539,28 +481,24 @@ fn render_apply_json(
 }
 
 /// Build a JSON entry for one apply result.
-fn apply_entry(r: &ApplyResult) -> serde_json::Value {
+fn apply_entry(result: &ApplyResult) -> serde_json::Value {
     serde_json::json!({
-        "name": r.name,
-        "stepsExecuted": r.steps_executed,
-        "success": r.success,
-        "error": r.error,
+        "name": result.name,
+        "stepsExecuted": result.steps_executed,
+        "success": result.success,
+        "error": result.error,
     })
 }
 
 /// Render apply results as text.
-fn render_apply_text(
-    cluster: &str,
-    results: &[ApplyResult],
-    writer: &mut dyn Write,
-) -> Result<(), ForgeError> {
-    for r in results {
-        let status = if r.success { "applied" } else { "FAILED" };
+fn render_apply_text(cluster: &str, results: &[ApplyResult], writer: &mut dyn Write) -> Result<(), ForgeError> {
+    for result in results {
+        let status = if result.success { "applied" } else { "FAILED" };
         output::write_text(
             writer,
             &format!(
                 "{status} stack {} -> {cluster} ({} steps)",
-                r.name, r.steps_executed
+                result.name, result.steps_executed
             ),
         )?;
     }
@@ -573,7 +511,7 @@ fn render_apply_text(
 
 /// Render status as JSON.
 fn render_status_json(entries: &[&StackState], writer: &mut dyn Write) -> Result<(), ForgeError> {
-    let stacks: Vec<serde_json::Value> = entries.iter().map(|s| status_entry(s)).collect();
+    let stacks: Vec<serde_json::Value> = entries.iter().map(|entry| status_entry(entry)).collect();
     let data = serde_json::json!({ "stacks": stacks });
     let result = output::success(data);
     output::write_json(writer, &result)?;
@@ -581,22 +519,22 @@ fn render_status_json(entries: &[&StackState], writer: &mut dyn Write) -> Result
 }
 
 /// Build a JSON entry for one stack state.
-fn status_entry(s: &StackState) -> serde_json::Value {
+fn status_entry(entry: &StackState) -> serde_json::Value {
     serde_json::json!({
-        "name": s.name,
-        "cluster": s.cluster,
-        "phase": format!("{:?}", s.phase).to_lowercase(),
-        "digest": s.digest,
-        "timestamp": s.timestamp,
+        "name": entry.name,
+        "cluster": entry.cluster,
+        "phase": format!("{:?}", entry.phase).to_lowercase(),
+        "digest": entry.digest,
+        "timestamp": entry.timestamp,
     })
 }
 
 /// Render status as text.
 fn render_status_text(entries: &[&StackState], writer: &mut dyn Write) -> Result<(), ForgeError> {
     output::write_text(writer, &format!("Stacks: {}", entries.len()))?;
-    for s in entries {
-        let phase = format!("{:?}", s.phase).to_lowercase();
-        output::write_text(writer, &format!("  {}/{}: {phase}", s.cluster, s.name))?;
+    for entry in entries {
+        let phase = format!("{:?}", entry.phase).to_lowercase();
+        output::write_text(writer, &format!("  {}/{}: {phase}", entry.cluster, entry.name))?;
     }
     Ok(())
 }
@@ -634,24 +572,24 @@ fn step_description(step: &crate::config::StepSpec) -> String {
         crate::config::StepSpec::Helm { release, chart, .. } => format!("helm {release} ({chart})"),
         crate::config::StepSpec::Deployment { name, image, .. } => {
             format!("deploy {name} ({image})")
-        }
+        },
         crate::config::StepSpec::Service { name, port, .. } => format!("service {name}:{port}"),
         crate::config::StepSpec::Wait { resource, .. } => format!("wait {resource}"),
         crate::config::StepSpec::Exec { command, .. } => command
             .first()
-            .map_or_else(|| "exec <empty>".to_owned(), |p| format!("exec {p}")),
+            .map_or_else(|| "exec <empty>".to_owned(), |prog| format!("exec {prog}")),
         crate::config::StepSpec::ForEach { property, steps } => {
             format!("for-each {property} ({} steps)", steps.len())
-        }
+        },
         crate::config::StepSpec::MetallbAutoPool { name } => format!("metallb pool {name}"),
         crate::config::StepSpec::CoreDnsForward { zone, .. } => format!("coredns forward {zone}"),
         crate::config::StepSpec::Capture { key, resource, .. } => {
             format!("capture {key} from {resource}")
-        }
+        },
         crate::config::StepSpec::TemplateManifest { path } => format!("template-apply {path}"),
         crate::config::StepSpec::TemplateFile { source, target } => {
             format!("template-file {source} -> {target}")
-        }
+        },
     }
 }
 
@@ -659,7 +597,19 @@ fn step_description(step: &crate::config::StepSpec) -> String {
 fn step_warning(step: &crate::config::StepSpec) -> Option<&'static str> {
     match step {
         crate::config::StepSpec::Exec { .. } => Some("exec is an explicit command escape hatch"),
-        _ => None,
+        crate::config::StepSpec::Url { .. }
+        | crate::config::StepSpec::Manifest { .. }
+        | crate::config::StepSpec::Kustomize { .. }
+        | crate::config::StepSpec::Helm { .. }
+        | crate::config::StepSpec::Deployment { .. }
+        | crate::config::StepSpec::Service { .. }
+        | crate::config::StepSpec::Wait { .. }
+        | crate::config::StepSpec::ForEach { .. }
+        | crate::config::StepSpec::MetallbAutoPool { .. }
+        | crate::config::StepSpec::CoreDnsForward { .. }
+        | crate::config::StepSpec::Capture { .. }
+        | crate::config::StepSpec::TemplateManifest { .. }
+        | crate::config::StepSpec::TemplateFile { .. } => None,
     }
 }
 
@@ -669,8 +619,7 @@ mod tests {
 
     use super::*;
     use crate::config::{
-        API_VERSION, ClusterSpec, EnvironmentSpec, ForgeConfig, KIND, Metadata, NetworkConfig,
-        NodeConfig, RuntimeConfig, StackSpec, StepSpec,
+        API_VERSION, EnvironmentSpec, ForgeConfig, KIND, Metadata, NetworkConfig, NodeConfig, RuntimeConfig, StepSpec,
     };
 
     fn test_stack() -> StackSpec {
@@ -728,14 +677,8 @@ mod tests {
         let mut buf = Vec::new();
         handle_list(&ctx, &mut buf).unwrap_or_else(|_| std::process::abort());
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("Stacks: 1"),
-            "should show stack count: {text}"
-        );
-        assert!(
-            text.contains("base (2 steps)"),
-            "should list base stack: {text}"
-        );
+        assert!(text.contains("Stacks: 1"), "should show stack count: {text}");
+        assert!(text.contains("base (2 steps)"), "should list base stack: {text}");
     }
 
     #[test]
@@ -753,14 +696,8 @@ mod tests {
         let mut buf = Vec::new();
         handle_plan(&ctx, "hub", None, &mut buf).unwrap_or_else(|_| std::process::abort());
         let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("Stack: base -> hub"),
-            "should show stack target: {text}"
-        );
-        assert!(
-            text.contains("[manifest]"),
-            "should describe manifest step: {text}"
-        );
+        assert!(text.contains("Stack: base -> hub"), "should show stack target: {text}");
+        assert!(text.contains("[manifest]"), "should describe manifest step: {text}");
         assert!(text.contains("[wait]"), "should describe wait step: {text}");
     }
 
@@ -793,13 +730,7 @@ mod tests {
     #[test]
     fn failed_stack_state_is_retryable_without_manual_deletion() {
         let mut state = state::empty();
-        set_stack_failed(
-            &mut state,
-            "edge-gateway",
-            "east-edge",
-            Some("old"),
-            "first failure",
-        );
+        set_stack_failed(&mut state, "edge-gateway", "east-edge", Some("old"), "first failure");
         upsert_stack_state(
             &mut state,
             "edge-gateway",
@@ -807,14 +738,10 @@ mod tests {
             StackPhase::Applying,
             Some("new"),
         );
-        let entry = state::find_stack(&state, "edge-gateway", "east-edge")
-            .unwrap_or_else(|| std::process::abort());
+        let entry = state::find_stack(&state, "edge-gateway", "east-edge").unwrap_or_else(|| std::process::abort());
         assert_eq!(entry.phase, StackPhase::Applying);
         assert_eq!(entry.digest.as_deref(), Some("new"));
-        assert!(
-            entry.error.is_none(),
-            "retry must clear the previous failure"
-        );
+        assert!(entry.error.is_none(), "retry must clear the previous failure");
     }
 
     #[test]
@@ -829,11 +756,7 @@ mod tests {
             format: OutputFormat::Text,
             dry_run: false,
         };
-        let cluster = &config
-            .spec
-            .clusters
-            .first()
-            .unwrap_or_else(|| std::process::abort());
+        let cluster = &config.spec.clusters.first().unwrap_or_else(|| std::process::abort());
         let st = state::empty();
         let result = build_network_params(&ctx, cluster, &st);
         assert!(result.is_none(), "should return None without crossCluster");
@@ -855,19 +778,12 @@ mod tests {
             format: OutputFormat::Text,
             dry_run: false,
         };
-        let cluster = &config
-            .spec
-            .clusters
-            .first()
-            .unwrap_or_else(|| std::process::abort());
+        let cluster = &config.spec.clusters.first().unwrap_or_else(|| std::process::abort());
         let st = state::empty();
         let result = build_network_params(&ctx, cluster, &st);
         assert!(result.is_some(), "should return Some with crossCluster");
         let params = result.unwrap_or_else(|| std::process::abort());
-        assert_eq!(
-            params.dns_zone, "forge.test",
-            "should default to forge.test"
-        );
+        assert_eq!(params.dns_zone, "forge.test", "should default to forge.test");
         assert_eq!(params.cluster_index, 0, "hub should be index 0");
     }
 
@@ -893,10 +809,7 @@ mod tests {
         let network = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(network.cidr.as_deref(), Some("172.18.0.0/16"));
         assert_eq!(network.cluster_pools.len(), 1);
-        let pool = network
-            .cluster_pools
-            .first()
-            .unwrap_or_else(|| std::process::abort());
+        let pool = network.cluster_pools.first().unwrap_or_else(|| std::process::abort());
         assert_eq!(pool.cluster, "hub");
         assert_eq!(pool.range, allocation.range);
     }
@@ -922,10 +835,7 @@ mod tests {
 
         let network = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(network.cluster_pools.len(), 1);
-        let pool = network
-            .cluster_pools
-            .first()
-            .unwrap_or_else(|| std::process::abort());
+        let pool = network.cluster_pools.first().unwrap_or_else(|| std::process::abort());
         assert_eq!(pool.range, allocation.range);
     }
 }

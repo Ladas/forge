@@ -73,13 +73,13 @@ impl fmt::Display for CommandSpec {
 
 /// Replace a value with `[REDACTED]` if it matches any redaction.
 fn redact_value(value: &OsString, redactions: &[Redaction]) -> String {
-    let s = value.to_string_lossy();
-    for r in redactions {
-        if *value == r.value {
+    let lossy = value.to_string_lossy();
+    for rd in redactions {
+        if *value == rd.value {
             return "[REDACTED]".to_owned();
         }
     }
-    s.into_owned()
+    lossy.into_owned()
 }
 
 // -----------------------------------------------------------------
@@ -101,8 +101,8 @@ impl CommandRunner for SystemRunner {
 fn build_process(spec: &CommandSpec) -> std::process::Command {
     let mut cmd = std::process::Command::new(&spec.program);
     cmd.args(&spec.args);
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
+    for (key, val) in &spec.env {
+        cmd.env(key, val);
     }
     configure_stdio(&mut cmd, spec.stdin.is_some());
     cmd
@@ -118,13 +118,10 @@ fn configure_stdio(cmd: &mut std::process::Command, pipe_stdin: bool) {
 }
 
 /// Execute a prepared command, optionally piping stdin data.
-fn run_process(
-    cmd: &mut std::process::Command,
-    spec: &CommandSpec,
-) -> Result<std::process::Output, ForgeError> {
+fn run_process(cmd: &mut std::process::Command, spec: &CommandSpec) -> Result<std::process::Output, ForgeError> {
     match &spec.stdin {
         Some(data) => run_with_stdin(cmd, data, spec),
-        None => cmd.output().map_err(|e| command_error(spec, &e)),
+        None => cmd.output().map_err(|err| command_error(spec, &err)),
     }
 }
 
@@ -134,11 +131,9 @@ fn run_with_stdin(
     data: &[u8],
     spec: &CommandSpec,
 ) -> Result<std::process::Output, ForgeError> {
-    let mut child = cmd.spawn().map_err(|e| command_error(spec, &e))?;
+    let mut child = cmd.spawn().map_err(|err| command_error(spec, &err))?;
     let write_result = pipe_stdin(&mut child, data);
-    let output = child
-        .wait_with_output()
-        .map_err(|e| command_error(spec, &e))?;
+    let output = child.wait_with_output().map_err(|err| command_error(spec, &err))?;
 
     match write_result {
         Ok(()) => Ok(output),
@@ -228,7 +223,7 @@ impl MockRunner {
         self.calls
             .borrow()
             .iter()
-            .filter(|c| format!("{c}").contains(pattern))
+            .filter(|call| format!("{call}").contains(pattern))
             .cloned()
             .collect()
     }
@@ -238,7 +233,7 @@ impl MockRunner {
         self.calls
             .borrow()
             .iter()
-            .any(|c| format!("{c}").contains(pattern))
+            .any(|call| format!("{call}").contains(pattern))
     }
 
     /// Clear all recorded calls.
@@ -285,14 +280,8 @@ mod tests {
             }],
         };
         let display = format!("{spec}");
-        assert!(
-            display.contains("[REDACTED]"),
-            "should redact arg, got: {display}"
-        );
-        assert!(
-            !display.contains("s3cr3t"),
-            "secret should not appear, got: {display}"
-        );
+        assert!(display.contains("[REDACTED]"), "should redact arg, got: {display}");
+        assert!(!display.contains("s3cr3t"), "secret should not appear, got: {display}");
     }
 
     #[test]
@@ -350,10 +339,7 @@ mod tests {
             std::process::abort();
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains("not found"),
-            "expected not-found error, got: {msg}"
-        );
+        assert!(msg.contains("not found"), "expected not-found error, got: {msg}");
     }
 
     #[test]
@@ -397,14 +383,8 @@ mod tests {
             redact: Vec::new(),
         };
         let _result = runner.run(&spec);
-        assert!(
-            runner.was_called("kind get clusters"),
-            "should match display string"
-        );
-        assert!(
-            !runner.was_called("kind create"),
-            "should not match unrelated command"
-        );
+        assert!(runner.was_called("kind get clusters"), "should match display string");
+        assert!(!runner.was_called("kind create"), "should not match unrelated command");
     }
 
     #[test]
@@ -441,9 +421,7 @@ mod tests {
             redact: Vec::new(),
         };
 
-        let output = SystemRunner
-            .run(&spec)
-            .unwrap_or_else(|_| std::process::abort());
+        let output = SystemRunner.run(&spec).unwrap_or_else(|_| std::process::abort());
 
         assert_eq!(output.status, 23);
         assert_eq!(output.stderr, "primary failure");
@@ -459,9 +437,7 @@ mod tests {
             redact: Vec::new(),
         };
 
-        let output = SystemRunner
-            .run(&spec)
-            .unwrap_or_else(|_| std::process::abort());
+        let output = SystemRunner.run(&spec).unwrap_or_else(|_| std::process::abort());
 
         assert_eq!(output.status, 0);
         assert_eq!(output.stdout, "manifest");

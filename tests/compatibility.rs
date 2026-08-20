@@ -4,10 +4,7 @@
 //! topologies load, validate, and produce correct plans from the
 //! standalone Forge binary — without requiring a Grid checkout.
 
-#![allow(
-    clippy::tests_outside_test_module,
-    reason = "integration tests live in tests/"
-)]
+#![allow(clippy::tests_outside_test_module, reason = "integration tests live in tests/")]
 
 use std::path::Path;
 
@@ -20,11 +17,7 @@ use forge::config;
 /// Load and validate a fixture by name, returning the parsed config.
 fn load_fixture(name: &str) -> config::ForgeConfig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
-    assert!(
-        path.exists(),
-        "fixture {name} not found at {}",
-        path.display()
-    );
+    assert!(path.exists(), "fixture {name} not found at {}", path.display());
     let cfg = config::load(&path).unwrap_or_else(|_| {
         std::process::abort();
         #[expect(unreachable_code, reason = "abort prevents reaching this")]
@@ -53,7 +46,7 @@ fn glb_demo_validates() {
     assert_eq!(cfg.spec.clusters.len(), 4, "should have 4 clusters");
     assert_eq!(cfg.spec.stacks.len(), 3, "should have 3 stacks");
     assert!(
-        cfg.spec.network.as_ref().is_some_and(|n| n.cross_cluster),
+        cfg.spec.network.as_ref().is_some_and(|net| net.cross_cluster),
         "should enable crossCluster"
     );
 }
@@ -108,10 +101,7 @@ fn combined_site_all_clusters_reference_valid_stacks() {
 #[test]
 fn llmd_pool_metrics_validates() {
     let cfg = load_fixture("tests/fixtures/llmd-pool-metrics.yaml");
-    assert_eq!(
-        cfg.metadata.name, "llmd-pool-metrics",
-        "metadata.name mismatch"
-    );
+    assert_eq!(cfg.metadata.name, "llmd-pool-metrics", "metadata.name mismatch");
     assert_eq!(cfg.spec.clusters.len(), 2, "should have 2 clusters");
     assert_eq!(cfg.spec.stacks.len(), 5, "should have 5 stacks");
 }
@@ -138,7 +128,7 @@ fn maas_ipp_validates() {
     assert_eq!(cfg.metadata.name, "maas-ipp", "metadata.name mismatch");
     assert_eq!(cfg.spec.clusters.len(), 1, "should have 1 cluster");
     assert!(
-        cfg.spec.network.as_ref().is_some_and(|n| !n.cross_cluster),
+        cfg.spec.network.as_ref().is_some_and(|net| !net.cross_cluster),
         "should not enable crossCluster"
     );
 }
@@ -146,21 +136,9 @@ fn maas_ipp_validates() {
 #[test]
 fn maas_ipp_cluster_has_version_properties() {
     let cfg = load_fixture("tests/fixtures/maas-ipp.yaml");
-    let cluster = cfg
-        .spec
-        .clusters
-        .first()
-        .unwrap_or_else(|| std::process::abort());
-    for key in [
-        "metallbVersion",
-        "metallbSha256",
-        "gatewayApiVersion",
-        "gieVersion",
-    ] {
-        assert!(
-            cluster.properties.contains_key(key),
-            "cluster must have {key} property"
-        );
+    let cluster = cfg.spec.clusters.first().unwrap_or_else(|| std::process::abort());
+    for key in ["metallbVersion", "metallbSha256", "gatewayApiVersion", "gieVersion"] {
+        assert!(cluster.properties.contains_key(key), "cluster must have {key} property");
     }
 }
 
@@ -172,10 +150,7 @@ fn maas_ipp_cluster_has_version_properties() {
 fn minimal_validates() {
     let cfg = load_fixture("examples/minimal.yaml");
     assert_eq!(cfg.metadata.name, "minimal", "metadata.name mismatch");
-    assert!(
-        cfg.spec.clusters.is_empty(),
-        "minimal should have no clusters"
-    );
+    assert!(cfg.spec.clusters.is_empty(), "minimal should have no clusters");
     assert!(cfg.spec.stacks.is_empty(), "minimal should have no stacks");
 }
 
@@ -193,10 +168,7 @@ fn incompatible_api_version_rejected() {
     )
     .unwrap_or_else(|_| std::process::abort());
     let result = config::load(&path).and_then(|cfg| config::validate::validate(&cfg));
-    assert!(
-        result.is_err(),
-        "incompatible apiVersion should be rejected"
-    );
+    assert!(result.is_err(), "incompatible apiVersion should be rejected");
 }
 
 #[test]

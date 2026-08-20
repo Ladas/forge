@@ -287,21 +287,11 @@ pub fn save(state_dir: &Path, state: &ForgeState) -> Result<(), ForgeError> {
 pub fn ensure_dir(state_dir: &Path) -> Result<(), ForgeError> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    std::fs::create_dir_all(state_dir).map_err(|e| {
-        ForgeError::State(format!(
-            "cannot create state dir {}: {e}",
-            state_dir.display()
-        ))
-    })?;
+    std::fs::create_dir_all(state_dir)
+        .map_err(|err| ForgeError::State(format!("cannot create state dir {}: {err}", state_dir.display())))?;
     // The directory also holds exported kubeconfigs under runtime/kubeconfig.
-    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(STATE_DIR_MODE)).map_err(
-        |e| {
-            ForgeError::State(format!(
-                "cannot set mode on state dir {}: {e}",
-                state_dir.display()
-            ))
-        },
-    )
+    std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(STATE_DIR_MODE))
+        .map_err(|err| ForgeError::State(format!("cannot set mode on state dir {}: {err}", state_dir.display())))
 }
 
 // ---------------------------------------------------------------
@@ -309,52 +299,48 @@ pub fn ensure_dir(state_dir: &Path) -> Result<(), ForgeError> {
 // ---------------------------------------------------------------
 
 /// Find a cluster in state by config name.
-pub fn find_cluster<'a>(state: &'a ForgeState, name: &str) -> Option<&'a ClusterState> {
-    state.clusters.iter().find(|c| c.name == name)
+pub fn find_cluster<'st>(state: &'st ForgeState, name: &str) -> Option<&'st ClusterState> {
+    state.clusters.iter().find(|cluster| cluster.name == name)
 }
 
 /// Find a cluster in state by config name (mutable).
-pub fn find_cluster_mut<'a>(state: &'a mut ForgeState, name: &str) -> Option<&'a mut ClusterState> {
-    state.clusters.iter_mut().find(|c| c.name == name)
+pub fn find_cluster_mut<'st>(state: &'st mut ForgeState, name: &str) -> Option<&'st mut ClusterState> {
+    state.clusters.iter_mut().find(|cluster| cluster.name == name)
 }
 
 /// Find a service in state by config name.
-pub fn find_service<'a>(state: &'a ForgeState, name: &str) -> Option<&'a ServiceState> {
-    state.services.iter().find(|s| s.name == name)
+pub fn find_service<'st>(state: &'st ForgeState, name: &str) -> Option<&'st ServiceState> {
+    state.services.iter().find(|svc| svc.name == name)
 }
 
 /// Find a service in state by config name (mutable).
-pub fn find_service_mut<'a>(state: &'a mut ForgeState, name: &str) -> Option<&'a mut ServiceState> {
-    state.services.iter_mut().find(|s| s.name == name)
+pub fn find_service_mut<'st>(state: &'st mut ForgeState, name: &str) -> Option<&'st mut ServiceState> {
+    state.services.iter_mut().find(|svc| svc.name == name)
 }
 
 /// Find a stack in state by name and cluster.
-pub fn find_stack<'a>(state: &'a ForgeState, name: &str, cluster: &str) -> Option<&'a StackState> {
+pub fn find_stack<'st>(state: &'st ForgeState, name: &str, cluster: &str) -> Option<&'st StackState> {
     state
         .stacks
         .iter()
-        .find(|s| s.name == name && s.cluster == cluster)
+        .find(|stack| stack.name == name && stack.cluster == cluster)
 }
 
 /// Find a stack in state by name and cluster (mutable).
-pub fn find_stack_mut<'a>(
-    state: &'a mut ForgeState,
-    name: &str,
-    cluster: &str,
-) -> Option<&'a mut StackState> {
+pub fn find_stack_mut<'st>(state: &'st mut ForgeState, name: &str, cluster: &str) -> Option<&'st mut StackState> {
     state
         .stacks
         .iter_mut()
-        .find(|s| s.name == name && s.cluster == cluster)
+        .find(|stack| stack.name == name && stack.cluster == cluster)
 }
 
 /// Find a cluster's `MetalLB` pool allocation in network state.
-pub fn find_cluster_pool<'a>(state: &'a ForgeState, cluster: &str) -> Option<&'a str> {
+pub fn find_cluster_pool<'st>(state: &'st ForgeState, cluster: &str) -> Option<&'st str> {
     state
         .network
         .as_ref()
-        .and_then(|n| n.cluster_pools.iter().find(|p| p.cluster == cluster))
-        .map(|p| p.range.as_str())
+        .and_then(|net| net.cluster_pools.iter().find(|pool| pool.cluster == cluster))
+        .map(|pool| pool.range.as_str())
 }
 
 // ---------------------------------------------------------------
@@ -370,7 +356,7 @@ pub fn find_cluster_pool<'a>(state: &'a ForgeState, cluster: &str) -> Option<&'a
 /// Returns [`ForgeError::State`] if serialization fails.
 pub fn config_digest(config: &ForgeConfig) -> Result<String, ForgeError> {
     let json = serde_json::to_string(config)
-        .map_err(|e| ForgeError::State(format!("cannot serialize config for digest: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("cannot serialize config for digest: {err}")))?;
     let hash = sha2::Sha256::digest(json.as_bytes());
     Ok(format!("{hash:x}"))
 }
@@ -399,9 +385,9 @@ fn state_path(state_dir: &Path) -> PathBuf {
 /// Read and parse the state file.
 fn read_state(path: &Path) -> Result<ForgeState, ForgeError> {
     let content = std::fs::read_to_string(path)
-        .map_err(|e| ForgeError::State(format!("cannot read {}: {e}", path.display())))?;
+        .map_err(|err| ForgeError::State(format!("cannot read {}: {err}", path.display())))?;
     serde_json::from_str(&content)
-        .map_err(|e| ForgeError::State(format!("corrupt state file {}: {e}", path.display())))
+        .map_err(|err| ForgeError::State(format!("corrupt state file {}: {err}", path.display())))
 }
 
 /// Write state to a temporary file in the state directory.
@@ -410,7 +396,7 @@ fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeErro
 
     let tmp = state_dir.join(STATE_TMP);
     let json = serde_json::to_string_pretty(state)
-        .map_err(|e| ForgeError::State(format!("cannot serialize state: {e}")))?;
+        .map_err(|err| ForgeError::State(format!("cannot serialize state: {err}")))?;
     // Captures hold values read straight out of cluster objects, so the file is
     // created 0600 rather than inheriting the umask.
     let mut file = std::fs::OpenOptions::new()
@@ -419,30 +405,30 @@ fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeErro
         .truncate(true)
         .mode(STATE_FILE_MODE)
         .open(&tmp)
-        .map_err(|e| ForgeError::State(format!("cannot create {}: {e}", tmp.display())))?;
+        .map_err(|err| ForgeError::State(format!("cannot create {}: {err}", tmp.display())))?;
     // `mode` above applies only when the file is created. A tmp file left by a
     // killed run keeps its old mode through truncate, and rename would carry
     // that mode onto the state file, so set it on the open handle too.
     file.set_permissions(std::fs::Permissions::from_mode(STATE_FILE_MODE))
-        .map_err(|e| ForgeError::State(format!("cannot set mode on {}: {e}", tmp.display())))?;
+        .map_err(|err| ForgeError::State(format!("cannot set mode on {}: {err}", tmp.display())))?;
     file.write_all(json.as_bytes())
-        .map_err(|e| ForgeError::State(format!("cannot write {}: {e}", tmp.display())))?;
+        .map_err(|err| ForgeError::State(format!("cannot write {}: {err}", tmp.display())))?;
     Ok(tmp)
 }
 
 /// Fsync a file by path.
 fn fsync_file(path: &Path) -> Result<(), ForgeError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| ForgeError::State(format!("cannot open for fsync {}: {e}", path.display())))?;
+        .map_err(|err| ForgeError::State(format!("cannot open for fsync {}: {err}", path.display())))?;
     file.sync_all()
-        .map_err(|e| ForgeError::State(format!("fsync failed for {}: {e}", path.display())))
+        .map_err(|err| ForgeError::State(format!("fsync failed for {}: {err}", path.display())))
 }
 
 /// Atomic rename from temp to final path.
 fn rename_state(tmp: &Path, final_path: &Path) -> Result<(), ForgeError> {
-    std::fs::rename(tmp, final_path).map_err(|e| {
+    std::fs::rename(tmp, final_path).map_err(|err| {
         ForgeError::State(format!(
-            "cannot rename {} to {}: {e}",
+            "cannot rename {} to {}: {err}",
             tmp.display(),
             final_path.display()
         ))
@@ -531,10 +517,7 @@ mod tests {
                 unreachable!()
             }
         });
-        assert_eq!(
-            parsed.api_version, STATE_API_VERSION,
-            "round-trip api_version mismatch"
-        );
+        assert_eq!(parsed.api_version, STATE_API_VERSION, "round-trip api_version mismatch");
         assert!(parsed.clusters.is_empty(), "should have no clusters");
     }
 
@@ -554,10 +537,7 @@ mod tests {
                 unreachable!()
             }
         });
-        assert!(
-            state.clusters.is_empty(),
-            "missing file should yield empty state"
-        );
+        assert!(state.clusters.is_empty(), "missing file should yield empty state");
     }
 
     #[test]
@@ -586,7 +566,7 @@ mod tests {
         });
         assert_eq!(loaded.clusters.len(), 1, "should have one cluster");
         assert_eq!(
-            loaded.clusters.first().map(|c| c.name.as_str()),
+            loaded.clusters.first().map(|cluster| cluster.name.as_str()),
             Some("hub"),
             "cluster name mismatch"
         );
@@ -618,14 +598,9 @@ mod tests {
                 unreachable!()
             }
         });
-        assert_eq!(
-            digest.len(),
-            64,
-            "SHA-256 hex should be 64 chars, got {}",
-            digest.len()
-        );
+        assert_eq!(digest.len(), 64, "SHA-256 hex should be 64 chars, got {}", digest.len());
         assert!(
-            digest.chars().all(|c| c.is_ascii_hexdigit()),
+            digest.chars().all(|ch| ch.is_ascii_hexdigit()),
             "digest should be hex: {digest}"
         );
     }
@@ -640,10 +615,7 @@ mod tests {
             phase: ClusterPhase::Running,
         });
         assert!(find_cluster(&state, "hub").is_some(), "should find hub");
-        assert!(
-            find_cluster(&state, "missing").is_none(),
-            "should not find missing"
-        );
+        assert!(find_cluster(&state, "missing").is_none(), "should not find missing");
     }
 
     #[test]
@@ -655,11 +627,11 @@ mod tests {
             context: "kind-forge-hub".to_owned(),
             phase: ClusterPhase::Pending,
         });
-        if let Some(c) = find_cluster_mut(&mut state, "hub") {
-            c.phase = ClusterPhase::Running;
+        if let Some(cluster) = find_cluster_mut(&mut state, "hub") {
+            cluster.phase = ClusterPhase::Running;
         }
         assert_eq!(
-            find_cluster(&state, "hub").map(|c| &c.phase),
+            find_cluster(&state, "hub").map(|cluster| &cluster.phase),
             Some(&ClusterPhase::Running),
             "phase should be updated"
         );
@@ -686,7 +658,7 @@ mod tests {
         });
         assert_eq!(parsed.stacks.len(), 1, "should have one stack");
         assert_eq!(
-            parsed.stacks.first().map(|s| s.name.as_str()),
+            parsed.stacks.first().map(|stack| stack.name.as_str()),
             Some("base"),
             "stack name mismatch"
         );
@@ -696,14 +668,8 @@ mod tests {
     fn find_stack_returns_match() {
         let mut state = empty();
         state.stacks.push(make_stack_state("base", "hub"));
-        assert!(
-            find_stack(&state, "base", "hub").is_some(),
-            "should find base/hub"
-        );
-        assert!(
-            find_stack(&state, "base", "missing").is_none(),
-            "wrong cluster"
-        );
+        assert!(find_stack(&state, "base", "hub").is_some(), "should find base/hub");
+        assert!(find_stack(&state, "base", "missing").is_none(), "wrong cluster");
         assert!(find_stack(&state, "missing", "hub").is_none(), "wrong name");
     }
 
@@ -711,11 +677,11 @@ mod tests {
     fn find_stack_mut_allows_mutation() {
         let mut state = empty();
         state.stacks.push(make_stack_state("base", "hub"));
-        if let Some(s) = find_stack_mut(&mut state, "base", "hub") {
-            s.phase = StackPhase::Applied;
+        if let Some(stack) = find_stack_mut(&mut state, "base", "hub") {
+            stack.phase = StackPhase::Applied;
         }
         assert_eq!(
-            find_stack(&state, "base", "hub").map(|s| &s.phase),
+            find_stack(&state, "base", "hub").map(|stack| &stack.phase),
             Some(&StackPhase::Applied),
             "phase should be updated"
         );
@@ -728,8 +694,7 @@ mod tests {
             range: "172.18.255.231-172.18.255.250".to_owned(),
         };
         let json = serde_json::to_string(&pool).unwrap_or_else(|_| std::process::abort());
-        let back: ClusterPool =
-            serde_json::from_str(&json).unwrap_or_else(|_| std::process::abort());
+        let back: ClusterPool = serde_json::from_str(&json).unwrap_or_else(|_| std::process::abort());
         assert_eq!(back.cluster, "hub", "cluster name should survive roundtrip");
         assert_eq!(back.range, pool.range, "range should survive roundtrip");
     }
@@ -752,14 +717,9 @@ mod tests {
             ],
         };
         let json = serde_json::to_string(&ns).unwrap_or_else(|_| std::process::abort());
-        let back: NetworkState =
-            serde_json::from_str(&json).unwrap_or_else(|_| std::process::abort());
+        let back: NetworkState = serde_json::from_str(&json).unwrap_or_else(|_| std::process::abort());
         assert_eq!(back.cluster_pools.len(), 2, "both pools should roundtrip");
-        assert_eq!(
-            back.cidr.as_deref(),
-            Some("172.18.0.0/16"),
-            "cidr should roundtrip"
-        );
+        assert_eq!(back.cidr.as_deref(), Some("172.18.0.0/16"), "cidr should roundtrip");
     }
 
     #[test]

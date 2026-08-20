@@ -13,10 +13,7 @@ use crate::{
     networking,
     output::{self, OutputFormat},
     runtime, service,
-    state::{
-        self, ClusterPhase, ClusterState, NetworkPhase, ServiceHealth, ServicePhase, ServiceState,
-        lock,
-    },
+    state::{self, ClusterPhase, ClusterState, NetworkPhase, ServiceHealth, ServicePhase, ServiceState, lock},
 };
 
 /// Run the `up` command.
@@ -41,7 +38,7 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
     update_digest(ctx, &mut state)?;
     record_operation(&mut state, "up", true);
     checkpoint(ctx, &state)?;
-    render_all(writer, &net_result, &results, &svc_results, &ctx.format)
+    render_all(writer, net_result.as_ref(), &results, &svc_results, &ctx.format)
 }
 
 // ---------------------------------------------------------------
@@ -141,11 +138,7 @@ fn ensure_network(
 
 /// Check if the config requests cross-cluster networking.
 fn wants_network(ctx: &ForgeContext<'_>) -> bool {
-    ctx.config
-        .spec
-        .network
-        .as_ref()
-        .is_some_and(|n| n.cross_cluster)
+    ctx.config.spec.network.as_ref().is_some_and(|net| net.cross_cluster)
 }
 
 /// Record a network that exists but whose CIDR is not known yet.
@@ -207,15 +200,12 @@ struct ClusterResult {
 }
 
 /// Iterate configured clusters, creating any that are missing.
-fn create_clusters(
-    ctx: &ForgeContext<'_>,
-    state: &mut state::ForgeState,
-) -> Result<Vec<ClusterResult>, ForgeError> {
+fn create_clusters(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Result<Vec<ClusterResult>, ForgeError> {
     let docker_network = docker_network_for_kind(ctx);
     let mut results = Vec::new();
     for cluster in &ctx.config.spec.clusters {
-        let r = process_cluster(ctx, state, cluster, docker_network.as_deref())?;
-        results.push(r);
+        let result = process_cluster(ctx, state, cluster, docker_network.as_deref())?;
+        results.push(result);
     }
     Ok(results)
 }
@@ -226,7 +216,7 @@ fn docker_network_for_kind(ctx: &ForgeContext<'_>) -> Option<String> {
         .spec
         .network
         .as_ref()
-        .filter(|n| n.cross_cluster)
+        .filter(|net| net.cross_cluster)
         .map(|_| networking::network_name(&ctx.config.metadata.name))
 }
 
@@ -237,8 +227,7 @@ fn process_cluster(
     cluster: &ClusterSpec,
     docker_network: Option<&str>,
 ) -> Result<ClusterResult, ForgeError> {
-    let kind_name =
-        kind_ops::kind_cluster_name(&ctx.config.spec.runtime.cluster_prefix, &cluster.name);
+    let kind_name = kind_ops::kind_cluster_name(&ctx.config.spec.runtime.cluster_prefix, &cluster.name);
     if ctx.dry_run {
         return Ok(dry_run_result(&cluster.name, &kind_name));
     }
@@ -273,24 +262,13 @@ fn create_if_missing(
         ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
         return Ok(false);
     }
-    kind_ops::create_cluster(
-        ctx.runner,
-        kind_name,
-        &cluster.nodes,
-        &ctx.state_dir,
-        docker_network,
-    )?;
+    kind_ops::create_cluster(ctx.runner, kind_name, &cluster.nodes, &ctx.state_dir, docker_network)?;
     ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
     Ok(true)
 }
 
 /// Ensure a cluster has an entry in state with the given phase.
-fn ensure_state_entry(
-    state: &mut state::ForgeState,
-    name: &str,
-    kind_name: &str,
-    phase: ClusterPhase,
-) {
+fn ensure_state_entry(state: &mut state::ForgeState, name: &str, kind_name: &str, phase: ClusterPhase) {
     if let Some(cs) = state::find_cluster_mut(state, name) {
         cs.phase = phase;
         return;
@@ -320,12 +298,7 @@ fn export_kubeconfigs(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Resu
         if cluster.phase != ClusterPhase::Running {
             continue;
         }
-        kubeconfig::export_kubeconfig(
-            ctx.runner,
-            &cluster.kind_name,
-            &cluster.name,
-            &ctx.state_dir,
-        )?;
+        kubeconfig::export_kubeconfig(ctx.runner, &cluster.kind_name, &cluster.name, &ctx.state_dir)?;
     }
     Ok(())
 }
@@ -362,8 +335,8 @@ fn start_services(
         if !svc.auto_start {
             continue;
         }
-        let r = start_one_svc(ctx, binary, state, idx)?;
-        results.push(r);
+        let result = start_one_svc(ctx, binary, state, idx)?;
+        results.push(result);
     }
     Ok(results)
 }
@@ -401,11 +374,11 @@ fn start_one_svc(
 }
 
 /// Build service parameters from context.
-fn build_svc_params<'a>(
-    binary: &'a str,
-    cname: &'a str,
-    ctx: &'a ForgeContext<'_>,
-) -> service::ServiceParams<'a> {
+fn build_svc_params<'ctx>(
+    binary: &'ctx str,
+    cname: &'ctx str,
+    ctx: &'ctx ForgeContext<'_>,
+) -> service::ServiceParams<'ctx> {
     service::ServiceParams {
         binary,
         container_name: cname,
@@ -437,8 +410,8 @@ fn health_probe_host_port(svc: &crate::config::ServiceSpec, container_port: u16)
     }
     svc.ports
         .iter()
-        .find(|p| p.container == container_port && p.protocol == "tcp")
-        .map(|p| p.host)
+        .find(|port| port.container == container_port && port.protocol == "tcp")
+        .map(|port| port.host)
 }
 
 /// Insert or update a service state entry.
@@ -450,7 +423,7 @@ fn upsert_svc_state(
 ) {
     let phase = match health {
         ServiceHealth::Unhealthy => ServicePhase::Unhealthy,
-        _ => ServicePhase::Running,
+        ServiceHealth::Unknown | ServiceHealth::Healthy => ServicePhase::Running,
     };
     if let Some(ss) = state::find_service_mut(state, &svc.name) {
         ss.phase = phase;
@@ -494,7 +467,7 @@ fn record_operation(state: &mut state::ForgeState, operation: &str, success: boo
 /// Render all results (network, clusters, services).
 fn render_all(
     writer: &mut dyn Write,
-    net: &Option<NetworkSetup>,
+    net: Option<&NetworkSetup>,
     clusters: &[ClusterResult],
     services: &[ServiceResult],
     format: &OutputFormat,
@@ -508,16 +481,16 @@ fn render_all(
 /// Render results as JSON.
 fn render_json(
     writer: &mut dyn Write,
-    net: &Option<NetworkSetup>,
+    net: Option<&NetworkSetup>,
     clusters: &[ClusterResult],
     services: &[ServiceResult],
 ) -> Result<(), ForgeError> {
     let items: Vec<_> = clusters.iter().map(result_to_json).collect();
     let mut data = serde_json::json!({ "clusters": items });
-    if let (Some(n), Some(obj)) = (net, data.as_object_mut()) {
+    if let (Some(nd), Some(obj)) = (net, data.as_object_mut()) {
         obj.insert(
             "network".to_owned(),
-            serde_json::json!({ "name": n.name, "dryRun": n.dry_run }),
+            serde_json::json!({ "name": nd.name, "dryRun": nd.dry_run }),
         );
     }
     if let (false, Some(obj)) = (services.is_empty(), data.as_object_mut()) {
@@ -530,79 +503,73 @@ fn render_json(
 }
 
 /// Convert one result to a JSON value.
-fn result_to_json(r: &ClusterResult) -> serde_json::Value {
+fn result_to_json(result: &ClusterResult) -> serde_json::Value {
     serde_json::json!({
-        "name": r.name,
-        "kindName": r.kind_name,
-        "created": r.created,
-        "dryRun": r.dry_run,
+        "name": result.name,
+        "kindName": result.kind_name,
+        "created": result.created,
+        "dryRun": result.dry_run,
     })
 }
 
 /// Convert one service result to JSON.
-fn svc_to_json(s: &ServiceResult) -> serde_json::Value {
+fn svc_to_json(svc: &ServiceResult) -> serde_json::Value {
     serde_json::json!({
-        "name": s.name,
-        "containerName": s.container_name,
-        "dryRun": s.dry_run,
+        "name": svc.name,
+        "containerName": svc.container_name,
+        "dryRun": svc.dry_run,
     })
 }
 
 /// Render results as text.
 fn render_text(
     writer: &mut dyn Write,
-    net: &Option<NetworkSetup>,
+    net: Option<&NetworkSetup>,
     clusters: &[ClusterResult],
     services: &[ServiceResult],
 ) -> Result<(), ForgeError> {
-    if let Some(n) = net {
-        output::write_text(writer, &format_net_text(n))?;
+    if let Some(nd) = net {
+        output::write_text(writer, &format_net_text(nd))?;
     }
-    for r in clusters {
-        output::write_text(writer, &format_result_text(r))?;
+    for result in clusters {
+        output::write_text(writer, &format_result_text(result))?;
     }
-    for s in services {
-        output::write_text(writer, &format_svc_text(s))?;
+    for svc in services {
+        output::write_text(writer, &format_svc_text(svc))?;
     }
     Ok(())
 }
 
 /// Format a service result as a text line.
-fn format_svc_text(s: &ServiceResult) -> String {
-    if s.dry_run {
-        return format!(
-            "would start service '{}' (container: {})",
-            s.name, s.container_name
-        );
+fn format_svc_text(svc: &ServiceResult) -> String {
+    if svc.dry_run {
+        return format!("would start service '{}' (container: {})", svc.name, svc.container_name);
     }
-    format!(
-        "started service '{}' (container: {})",
-        s.name, s.container_name
-    )
+    format!("started service '{}' (container: {})", svc.name, svc.container_name)
 }
 
 /// Format a network setup result as a text line.
-fn format_net_text(n: &NetworkSetup) -> String {
-    if n.dry_run {
-        return format!("would create network '{}'", n.name);
+fn format_net_text(net: &NetworkSetup) -> String {
+    if net.dry_run {
+        return format!("would create network '{}'", net.name);
     }
-    format!("network '{}' ready", n.name)
+    format!("network '{}' ready", net.name)
 }
 
 /// Format a single result as a text line.
-fn format_result_text(r: &ClusterResult) -> String {
-    if r.dry_run {
+fn format_result_text(result: &ClusterResult) -> String {
+    if result.dry_run {
         return format!(
             "would create cluster '{}' (kind name: {})",
-            r.name, r.kind_name
+            result.name, result.kind_name
         );
     }
-    if r.created {
-        return format!("created cluster '{}' (kind name: {})", r.name, r.kind_name);
+    if result.created {
+        return format!("created cluster '{}' (kind name: {})", result.name, result.kind_name);
     }
     format!(
         "cluster '{}' already exists (kind name: {})",
-        r.name, r.kind_name
+        result.name, result.kind_name
     )
 }
 
@@ -739,14 +706,8 @@ users:
             dry_run: false,
         };
         let text = run_up(&ctx);
-        assert!(
-            runner.was_called("kind create cluster"),
-            "should call kind create"
-        );
-        assert!(
-            text.contains("created"),
-            "output should mention created: {text}"
-        );
+        assert!(runner.was_called("kind create cluster"), "should call kind create");
+        assert!(text.contains("created"), "output should mention created: {text}");
     }
 
     #[test]
@@ -773,14 +734,8 @@ users:
             dry_run: false,
         };
         let text = run_up(&ctx);
-        assert!(
-            !runner.was_called("kind create"),
-            "should not call kind create"
-        );
-        assert!(
-            text.contains("already exists"),
-            "output should note existing: {text}"
-        );
+        assert!(!runner.was_called("kind create"), "should not call kind create");
+        assert!(text.contains("already exists"), "output should note existing: {text}");
     }
 
     #[test]
@@ -798,14 +753,8 @@ users:
             dry_run: true,
         };
         let text = run_up(&ctx);
-        assert!(
-            !runner.was_called("kind create"),
-            "dry-run should not call kind create"
-        );
-        assert!(
-            text.contains("would create"),
-            "should say would create: {text}"
-        );
+        assert!(!runner.was_called("kind create"), "dry-run should not call kind create");
+        assert!(text.contains("would create"), "should say would create: {text}");
     }
 
     /// Build a config with one service disabled for `forge up`.
@@ -880,10 +829,7 @@ spec:
 
         let text = run_up(&ctx);
 
-        assert!(
-            !runner.was_called("docker run"),
-            "autoStart false should not start"
-        );
+        assert!(!runner.was_called("docker run"), "autoStart false should not start");
         assert!(
             !text.contains("placeholder"),
             "skipped service should not appear as started: {text}"
@@ -1055,10 +1001,7 @@ spec:
             dry_run: false,
         };
         let text = run_up(&ctx);
-        assert!(
-            runner.was_called("network create"),
-            "should call network create"
-        );
+        assert!(runner.was_called("network create"), "should call network create");
         assert!(
             text.contains("network 'test-net' ready"),
             "should report network: {text}"
@@ -1076,6 +1019,7 @@ spec:
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "test setup")]
     fn up_records_earlier_phase_when_later_phase_fails() {
         let dir = test_dir();
         let config = test_config_with_network();
@@ -1100,10 +1044,7 @@ spec:
         let mut buf = Vec::new();
         let result = run(&ctx, &mut buf);
 
-        assert!(
-            result.is_err(),
-            "a failing cluster phase should fail the run"
-        );
+        assert!(result.is_err(), "a failing cluster phase should fail the run");
         assert!(
             runner.was_called("network create"),
             "the network phase should have created a real network"
@@ -1115,18 +1056,19 @@ spec:
         let persisted = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
         let net = persisted.network;
         assert_eq!(
-            net.as_ref().map(|n| n.name.as_str()),
+            net.as_ref().map(|ns| ns.name.as_str()),
             Some("test-net"),
             "the created network must be recorded so down can remove it"
         );
         assert_eq!(
-            net.map(|n| n.phase),
+            net.map(|ns| ns.phase),
             Some(NetworkPhase::Active),
             "the recorded network should be marked active"
         );
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "test setup")]
     fn up_records_network_when_cidr_inspect_fails() {
         let dir = test_dir();
         let config = test_config_with_network();
@@ -1156,17 +1098,14 @@ spec:
         let mut buf = Vec::new();
         let result = run(&ctx, &mut buf);
 
-        assert!(
-            result.is_err(),
-            "a failing CIDR inspect should fail the run"
-        );
+        assert!(result.is_err(), "a failing CIDR inspect should fail the run");
         assert!(
             runner.was_called("network create"),
             "the network should really have been created"
         );
         let persisted = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
         assert_eq!(
-            persisted.network.map(|n| n.name),
+            persisted.network.map(|ns| ns.name),
             Some("test-net".to_owned()),
             "a created network must be recorded even when the CIDR lookup fails"
         );
@@ -1245,14 +1184,8 @@ spec:
             dry_run: false,
         };
         let text = run_up(&ctx);
-        assert!(
-            !runner.was_called("network"),
-            "should not call any network commands"
-        );
-        assert!(
-            !text.contains("network"),
-            "should not mention network: {text}"
-        );
+        assert!(!runner.was_called("network"), "should not call any network commands");
+        assert!(!text.contains("network"), "should not mention network: {text}");
     }
 
     #[test]
@@ -1295,11 +1228,7 @@ spec:
         set_network_active(&mut st, "old-net", "172.18.0.0/16");
         let net = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(net.name, "old-net", "name should be preserved");
-        assert_eq!(
-            net.cidr.as_deref(),
-            Some("172.18.0.0/16"),
-            "cidr should be preserved"
-        );
+        assert_eq!(net.cidr.as_deref(), Some("172.18.0.0/16"), "cidr should be preserved");
         assert_eq!(net.cluster_pools.len(), 1, "pools should be preserved");
     }
 
@@ -1321,10 +1250,7 @@ spec:
         let net = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(net.phase, NetworkPhase::Active);
         assert_eq!(net.cidr.as_deref(), Some("172.18.0.0/16"));
-        assert!(
-            net.cluster_pools.is_empty(),
-            "stale pools must be discarded"
-        );
+        assert!(net.cluster_pools.is_empty(), "stale pools must be discarded");
     }
 
     #[test]
@@ -1438,16 +1364,12 @@ spec:
     /// Verify `kind create` was called with the expected Docker network env.
     fn assert_kind_create_has_network_env(runner: &MockRunner, expected: &str) {
         let calls = runner.calls();
-        let Some(call) = calls.iter().find(|c| c.to_string().contains("kind create")) else {
+        let Some(call) = calls.iter().find(|cl| cl.to_string().contains("kind create")) else {
             std::process::abort();
         };
         let key = std::ffi::OsString::from("KIND_EXPERIMENTAL_DOCKER_NETWORK");
-        let val = call.env.get(&key).map(|v| v.to_string_lossy().into_owned());
-        assert_eq!(
-            val.as_deref(),
-            Some(expected),
-            "kind create should set network env"
-        );
+        let val = call.env.get(&key).map(|os| os.to_string_lossy().into_owned());
+        assert_eq!(val.as_deref(), Some(expected), "kind create should set network env");
     }
 
     /// Config with `crossCluster: true` and `provider: auto`.
