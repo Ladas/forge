@@ -66,12 +66,12 @@ cargo test test_name
 Run the CLI:
 
 ```console
-cargo run -p praxis-forge
+cargo run --bin praxis-forge
 ```
 
 ## Architecture
 
-Single-crate workspace. All modules live under `src/`.
+Single-crate package. All modules live under `src/`.
 
 ```text
 main.rs        CLI entry point (clap)
@@ -115,11 +115,11 @@ state/         Persistent state under .forge/
 
 ## Conventions
 
-Coding conventions are defined in
-`~/.claude/CLAUDE.md` (Rust Baseline) and the parent
-monorepo's `CLAUDE.md`. Forge-specific notes:
+Coding conventions are defined in the [Praxis
+conventions repository](https://github.com/praxis-proxy/conventions).
+Forge-specific notes:
 
-- Single workspace crate (no sub-crates)
+- Single crate (no sub-crates)
 - `test-support` feature flag gates test-only code
 - All `make` targets use `--features test-support`
 - `mod_module_files` lint enforced: use `foo.rs` not
