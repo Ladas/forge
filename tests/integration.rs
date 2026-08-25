@@ -316,19 +316,29 @@ fn cli_accepts_stack_status() {
 
 #[test]
 fn config_with_port_mappings_parses_and_validates() {
-    let yaml = std::fs::read_to_string("tests/fixtures/port-mappings.yaml").unwrap_or_else(|e| {
-        eprintln!("cannot read fixture: {e}");
-        std::process::abort()
-    });
-    let cfg: config::ForgeConfig = serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
-        eprintln!("cannot parse: {e}");
-        std::process::abort()
-    });
-    validate::validate(&cfg).unwrap_or_else(|e| {
-        eprintln!("validation failed: {e}");
-        std::process::abort()
-    });
-    assert_eq!(cfg.spec.clusters[0].ports.len(), 2);
-    assert_eq!(cfg.spec.clusters[0].ports[0].host, 8080);
-    assert_eq!(cfg.spec.clusters[0].ports[0].container, 30080);
+    let yaml = std::fs::read_to_string("tests/fixtures/port-mappings.yaml")
+        .unwrap_or_else(|_| std::process::abort());
+    let cfg: config::ForgeConfig =
+        serde_yaml::from_str(&yaml).unwrap_or_else(|_| std::process::abort());
+    validate::validate(&cfg).unwrap_or_else(|_| std::process::abort());
+    let cluster = cfg
+        .spec
+        .clusters
+        .first()
+        .unwrap_or_else(|| std::process::abort());
+    assert_eq!(cluster.ports.len(), 3);
+    let first = cluster
+        .ports
+        .first()
+        .unwrap_or_else(|| std::process::abort());
+    assert_eq!(first.host, 8080);
+    assert_eq!(first.container, 30080);
+    let third = cluster
+        .ports
+        .get(2)
+        .unwrap_or_else(|| std::process::abort());
+    assert_eq!(third.host, 9090);
+    assert_eq!(third.container, 30090);
+    assert_eq!(third.bind_address.as_deref(), Some("127.0.0.1"));
+    assert_eq!(third.protocol, "udp");
 }

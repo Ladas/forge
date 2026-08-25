@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
     config::{
-        API_VERSION, ForgeConfig, HealthCheck, KIND, NetworkMode, RuntimeProvider, ServiceSpec,
-        StepSpec,
+        API_VERSION, ForgeConfig, HealthCheck, KIND, NetworkMode, PortMapping, RuntimeProvider,
+        ServiceSpec, StepSpec,
     },
     error::ForgeError,
 };
@@ -32,6 +32,7 @@ pub fn validate(config: &ForgeConfig) -> Result<(), ForgeError> {
     check_service_auto_start_deps(config)?;
     check_service_dep_cycles(config)?;
     check_service_port_conflicts(config)?;
+    check_cross_scope_port_conflicts(config)?;
     check_stack_names(config)?;
     check_cluster_stack_refs(config)?;
     check_stack_steps(config)?;
@@ -177,18 +178,19 @@ fn check_cluster_ports(config: &ForgeConfig) -> Result<(), ForgeError> {
     for cluster in &config.spec.clusters {
         let mut seen = BTreeSet::new();
         for (i, pm) in cluster.ports.iter().enumerate() {
+            let ctx = format!("cluster '{}' port mapping {}", cluster.name, i);
             if pm.host == 0 {
                 return Err(ForgeError::Validation(format!(
-                    "cluster '{}' port mapping {}: host port must be non-zero",
-                    cluster.name, i,
+                    "{ctx}: host port must be non-zero"
                 )));
             }
             if pm.container == 0 {
                 return Err(ForgeError::Validation(format!(
-                    "cluster '{}' port mapping {}: container port must be non-zero",
-                    cluster.name, i,
+                    "{ctx}: container port must be non-zero"
                 )));
             }
+            check_port_bind_address(&pm.bind_address, &ctx)?;
+            check_cluster_port_protocol(&pm.protocol, &ctx)?;
             let key = (pm.host, pm.protocol.to_lowercase());
             if !seen.insert(key) {
                 return Err(ForgeError::Validation(format!(
@@ -197,6 +199,17 @@ fn check_cluster_ports(config: &ForgeConfig) -> Result<(), ForgeError> {
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Cluster ports only allow `tcp` or `udp` (case-insensitive).
+fn check_cluster_port_protocol(protocol: &str, context: &str) -> Result<(), ForgeError> {
+    let lower = protocol.to_lowercase();
+    if lower != "tcp" && lower != "udp" {
+        return Err(ForgeError::Validation(format!(
+            "{context}: unsupported port protocol {protocol:?} (expected tcp or udp)"
+        )));
     }
     Ok(())
 }
@@ -246,7 +259,7 @@ fn check_service_ports(svc: &ServiceSpec) -> Result<(), ForgeError> {
     for port in &svc.ports {
         check_port_nonzero(port.host, &svc.name, "host")?;
         check_port_nonzero(port.container, &svc.name, "container")?;
-        check_port_bind_address(&port.bind_address, &svc.name)?;
+        check_port_bind_address(&port.bind_address, &format!("service {:?}", svc.name))?;
         check_port_protocol_tcp(&port.protocol, &svc.name)?;
     }
     Ok(())
@@ -263,13 +276,13 @@ fn check_port_nonzero(port: u16, svc_name: &str, field: &str) -> Result<(), Forg
 }
 
 /// Validate an optional bind address as a valid IP.
-fn check_port_bind_address(addr: &Option<String>, svc_name: &str) -> Result<(), ForgeError> {
+fn check_port_bind_address(addr: &Option<String>, context: &str) -> Result<(), ForgeError> {
     if let Some(addr) = addr
         .as_ref()
         .filter(|a| a.parse::<std::net::IpAddr>().is_err())
     {
         return Err(ForgeError::Validation(format!(
-            "service {svc_name:?}: bind address {addr:?} is not a valid IP"
+            "{context}: bind address {addr:?} is not a valid IP"
         )));
     }
     Ok(())
@@ -584,6 +597,43 @@ fn check_service_port_conflicts(config: &ForgeConfig) -> Result<(), ForgeError> 
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Reject host-port collisions across cluster and service port mappings.
+///
+/// `(host_port, protocol, bind_address)` must be unique across every port
+/// mapping in the config, whether it belongs to a cluster or a service.
+fn check_cross_scope_port_conflicts(config: &ForgeConfig) -> Result<(), ForgeError> {
+    let mut seen: BTreeSet<(String, u16, String)> = BTreeSet::new();
+    for cluster in &config.spec.clusters {
+        for pm in &cluster.ports {
+            check_port_collision(&mut seen, pm, &format!("cluster {:?}", cluster.name))?;
+        }
+    }
+    for svc in &config.spec.services {
+        for pm in &svc.ports {
+            check_port_collision(&mut seen, pm, &format!("service {:?}", svc.name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Record a port mapping's binding key, rejecting collisions.
+fn check_port_collision(
+    seen: &mut BTreeSet<(String, u16, String)>,
+    pm: &PortMapping,
+    context: &str,
+) -> Result<(), ForgeError> {
+    let bind = pm.bind_address.as_deref().unwrap_or("").to_owned();
+    let key = (bind.clone(), pm.host, pm.protocol.to_lowercase());
+    if !seen.insert(key) {
+        return Err(ForgeError::Validation(format!(
+            "{context}: duplicate host port binding {}:{}/{} conflicts with another \
+             cluster or service port mapping",
+            bind, pm.host, pm.protocol,
+        )));
     }
     Ok(())
 }
@@ -1391,6 +1441,190 @@ mod tests {
         });
         let result = validate(&config);
         assert!(result.is_err(), "duplicate host port should be rejected");
+    }
+
+    #[test]
+    fn cluster_port_bind_address_invalid_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: Some("not-an-ip".to_owned()),
+                host: 8080,
+                container: 30080,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bind address"),
+            "expected bind address error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_port_bind_address_valid_passes() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: Some("127.0.0.1".to_owned()),
+                host: 8080,
+                container: 30080,
+                protocol: "udp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
+    }
+
+    #[test]
+    fn cluster_port_invalid_protocol_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 8080,
+                container: 30080,
+                protocol: "sctp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("protocol"),
+            "expected protocol error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_port_udp_protocol_accepted() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 8080,
+                container: 30080,
+                protocol: "UDP".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
+    }
+
+    #[test]
+    fn cross_cluster_host_port_conflict_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "a".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 8080,
+                container: 30080,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        config.spec.clusters.push(ClusterSpec {
+            name: "b".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 8080,
+                container: 30081,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate host port binding"),
+            "expected cross-cluster conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_vs_service_host_port_conflict_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "a".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 8080,
+                container: 30080,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        config.spec.services = vec![test_service_with_port(PortMapping {
+            bind_address: None,
+            host: 8080,
+            container: 80,
+            protocol: "tcp".to_owned(),
+        })];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate host port binding"),
+            "expected cluster-vs-service conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn different_bind_addresses_do_not_conflict() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "a".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: Some("127.0.0.1".to_owned()),
+                host: 8080,
+                container: 30080,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        config.spec.services = vec![test_service_with_port(PortMapping {
+            bind_address: Some("127.0.0.2".to_owned()),
+            host: 8080,
+            container: 80,
+            protocol: "tcp".to_owned(),
+        })];
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]

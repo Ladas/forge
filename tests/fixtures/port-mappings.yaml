@@ -17,5 +17,9 @@ spec:
         - host: 3000
           container: 30300
           protocol: tcp
+        - host: 9090
+          container: 30090
+          bindAddress: "127.0.0.1"
+          protocol: udp
       stacks: []
   stacks: {}
