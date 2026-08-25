@@ -62,7 +62,7 @@ fn handle_create(
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut state = state::load(&ctx.state_dir)?;
-    create_if_missing(ctx, &kind_name, &cluster.nodes, &mut state, name)?;
+    create_if_missing(ctx, &kind_name, cluster, &mut state)?;
     state::save(&ctx.state_dir, &state)?;
     report_created(writer, name, &kind_name, &ctx.format)
 }
@@ -168,15 +168,20 @@ fn cluster_kind_name(ctx: &ForgeContext<'_>, name: &str) -> String {
 fn create_if_missing(
     ctx: &ForgeContext<'_>,
     kind_name: &str,
-    nodes: &crate::config::NodeConfig,
+    cluster: &crate::config::ClusterSpec,
     st: &mut state::ForgeState,
-    name: &str,
 ) -> Result<(), ForgeError> {
     if kind_ops::cluster_exists(ctx.runner, kind_name)? {
         return Ok(());
     }
-    kind_ops::create_cluster(ctx.runner, kind_name, nodes, &ctx.state_dir, None)?;
-    upsert_cluster_state(st, name, kind_name, ClusterPhase::Running);
+    let config = kind_ops::CreateClusterConfig {
+        nodes: &cluster.nodes,
+        ports: &cluster.ports,
+        config_dir: &ctx.state_dir,
+        docker_network: None,
+    };
+    kind_ops::create_cluster(ctx.runner, kind_name, &config)?;
+    upsert_cluster_state(st, &cluster.name, kind_name, ClusterPhase::Running);
     Ok(())
 }
 

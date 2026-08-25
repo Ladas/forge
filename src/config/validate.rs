@@ -25,6 +25,7 @@ pub fn validate(config: &ForgeConfig) -> Result<(), ForgeError> {
     check_network_name(&config.metadata.name, &config.spec)?;
     check_cluster_names(config)?;
     check_cluster_nodes(config)?;
+    check_cluster_ports(config)?;
     check_service_names(config)?;
     check_services(config)?;
     check_service_deps(config)?;
@@ -166,6 +167,35 @@ fn check_cluster_nodes(config: &ForgeConfig) -> Result<(), ForgeError> {
                 "cluster {:?}: controlPlanes must be at least 1",
                 cluster.name,
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate cluster-level port mappings.
+fn check_cluster_ports(config: &ForgeConfig) -> Result<(), ForgeError> {
+    for cluster in &config.spec.clusters {
+        let mut seen = BTreeSet::new();
+        for (i, pm) in cluster.ports.iter().enumerate() {
+            if pm.host == 0 {
+                return Err(ForgeError::Validation(format!(
+                    "cluster '{}' port mapping {}: host port must be non-zero",
+                    cluster.name, i,
+                )));
+            }
+            if pm.container == 0 {
+                return Err(ForgeError::Validation(format!(
+                    "cluster '{}' port mapping {}: container port must be non-zero",
+                    cluster.name, i,
+                )));
+            }
+            let key = (pm.host, pm.protocol.to_lowercase());
+            if !seen.insert(key) {
+                return Err(ForgeError::Validation(format!(
+                    "cluster '{}': duplicate host port {} ({})",
+                    cluster.name, pm.host, pm.protocol,
+                )));
+            }
         }
     }
     Ok(())
@@ -1193,6 +1223,7 @@ mod tests {
         let cluster = ClusterSpec {
             name: "dupe".to_owned(),
             nodes: NodeConfig::default(),
+            ports: Vec::new(),
             stacks: Vec::new(),
             properties: BTreeMap::new(),
         };
@@ -1213,6 +1244,7 @@ mod tests {
         config.spec.clusters = vec![ClusterSpec {
             name: "c1".to_owned(),
             nodes: NodeConfig::default(),
+            ports: Vec::new(),
             stacks: vec!["nonexistent".to_owned()],
             properties: BTreeMap::new(),
         }];
@@ -1232,6 +1264,7 @@ mod tests {
         config.spec.clusters = vec![ClusterSpec {
             name: "c1".to_owned(),
             nodes: NodeConfig::default(),
+            ports: Vec::new(),
             stacks: Vec::new(),
             properties: BTreeMap::from([(
                 "model".to_owned(),
@@ -1263,6 +1296,7 @@ mod tests {
         config.spec.clusters = vec![ClusterSpec {
             name: "hub".to_owned(),
             nodes: NodeConfig::default(),
+            ports: Vec::new(),
             stacks: vec!["base".to_owned()],
             properties: BTreeMap::new(),
         }];
@@ -1299,6 +1333,7 @@ mod tests {
                 control_planes: 0,
                 workers: 1,
             },
+            ports: Vec::new(),
             stacks: Vec::new(),
             properties: BTreeMap::new(),
         }];
@@ -1310,6 +1345,52 @@ mod tests {
             msg.contains("controlPlanes"),
             "expected control-plane count error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn cluster_port_zero_host_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![PortMapping {
+                bind_address: None,
+                host: 0,
+                container: 30080,
+                protocol: "tcp".to_owned(),
+            }],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        let result = validate(&config);
+        assert!(result.is_err(), "zero host port should be rejected");
+    }
+
+    #[test]
+    fn cluster_duplicate_host_port_rejected() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![
+                PortMapping {
+                    bind_address: None,
+                    host: 8080,
+                    container: 30080,
+                    protocol: "tcp".to_owned(),
+                },
+                PortMapping {
+                    bind_address: None,
+                    host: 8080,
+                    container: 30081,
+                    protocol: "tcp".to_owned(),
+                },
+            ],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        let result = validate(&config);
+        assert!(result.is_err(), "duplicate host port should be rejected");
     }
 
     #[test]

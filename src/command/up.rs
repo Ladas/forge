@@ -199,13 +199,13 @@ fn create_if_missing(
         ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
         return Ok(false);
     }
-    kind_ops::create_cluster(
-        ctx.runner,
-        kind_name,
-        &cluster.nodes,
-        &ctx.state_dir,
+    let cluster_config = kind_ops::CreateClusterConfig {
+        nodes: &cluster.nodes,
+        ports: &cluster.ports,
+        config_dir: &ctx.state_dir,
         docker_network,
-    )?;
+    };
+    kind_ops::create_cluster(ctx.runner, kind_name, &cluster_config)?;
     ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
     Ok(true)
 }

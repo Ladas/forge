@@ -1161,6 +1161,7 @@ mod tests {
         let cluster = ClusterSpec {
             name: "provider-east".to_owned(),
             nodes: NodeConfig::default(),
+            ports: Vec::new(),
             stacks: Vec::new(),
             properties: BTreeMap::new(),
         };
