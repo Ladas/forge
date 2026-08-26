@@ -28,26 +28,17 @@ pub struct CommandSpec {
     pub env: BTreeMap<OsString, OsString>,
     /// Optional standard input bytes.
     pub stdin: Option<Vec<u8>>,
-    /// Values that must not appear in display output.
+    /// Values that must not appear in display output.  Each value is
+    /// replaced wherever it occurs within an argument, so secrets
+    /// embedded in larger arguments (`--set token=SECRET`) are caught.
     pub redact: Vec<Redaction>,
 }
 
 /// A value to redact from display output.
 #[derive(Clone, Debug)]
 pub struct Redaction {
-    /// What kind of value is being redacted.
-    pub kind: RedactionKind,
     /// The literal value to replace with `[REDACTED]`.
     pub value: OsString,
-}
-
-/// Classification of redacted values.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RedactionKind {
-    /// A command-line argument.
-    Arg,
-    /// An environment variable value.
-    EnvValue,
 }
 
 /// Output from a completed command.
@@ -71,15 +62,20 @@ impl fmt::Display for CommandSpec {
     }
 }
 
-/// Replace a value with `[REDACTED]` if it matches any redaction.
+/// Replace every occurrence of a redacted value with `[REDACTED]`.
+///
+/// Matching is by substring on the lossy display form, so a secret
+/// embedded in a larger argument is redacted, not just an argument
+/// that equals the secret exactly.
 fn redact_value(value: &OsString, redactions: &[Redaction]) -> String {
-    let lossy = value.to_string_lossy();
+    let mut lossy = value.to_string_lossy().into_owned();
     for rd in redactions {
-        if *value == rd.value {
-            return "[REDACTED]".to_owned();
+        let needle = rd.value.to_string_lossy();
+        if !needle.is_empty() {
+            lossy = lossy.replace(needle.as_ref(), "[REDACTED]");
         }
     }
-    lossy.into_owned()
+    lossy
 }
 
 // -----------------------------------------------------------------
@@ -294,13 +290,40 @@ mod tests {
             env: BTreeMap::new(),
             stdin: None,
             redact: vec![Redaction {
-                kind: RedactionKind::Arg,
                 value: "s3cr3t-token".into(),
             }],
         };
         let display = format!("{spec}");
         assert!(display.contains("[REDACTED]"), "should redact arg, got: {display}");
         assert!(!display.contains("s3cr3t"), "secret should not appear, got: {display}");
+    }
+
+    #[test]
+    fn display_redacts_secret_embedded_in_larger_arg() {
+        let spec = CommandSpec {
+            program: "helm".into(),
+            args: vec!["--set".into(), "token=s3cr3t-token".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            redact: vec![Redaction {
+                value: "s3cr3t-token".into(),
+            }],
+        };
+        let display = format!("{spec}");
+        assert_eq!(display, "helm --set token=[REDACTED]");
+    }
+
+    #[test]
+    fn display_ignores_empty_redaction_value() {
+        let spec = CommandSpec {
+            program: "kubectl".into(),
+            args: vec!["get".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            redact: vec![Redaction { value: "".into() }],
+        };
+        let display = format!("{spec}");
+        assert_eq!(display, "kubectl get", "an empty redaction must not mangle output");
     }
 
     #[test]
