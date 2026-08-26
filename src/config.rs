@@ -85,7 +85,7 @@ pub struct EnvironmentSpec {
 // ---------------------------------------------------------------
 
 /// Container runtime selection.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RuntimeConfig {
     /// Container runtime to use.
@@ -94,6 +94,16 @@ pub struct RuntimeConfig {
     /// Prefix for Kind cluster names.
     #[serde(default = "default_cluster_prefix")]
     pub cluster_prefix: String,
+}
+
+impl Default for RuntimeConfig {
+    /// Mirror the serde field defaults (`auto` provider, `"forge"` prefix).
+    fn default() -> Self {
+        Self {
+            provider: RuntimeProvider::default(),
+            cluster_prefix: default_cluster_prefix(),
+        }
+    }
 }
 
 /// Available container runtime providers.

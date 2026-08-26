@@ -21,6 +21,7 @@ pub fn validate(config: &ForgeConfig) -> Result<(), ForgeError> {
     check_metadata_name(&config.metadata.name)?;
     check_network_name(&config.metadata.name, &config.spec)?;
     check_cluster_names(config)?;
+    check_cluster_prefix(config)?;
     check_cluster_nodes(config)?;
     check_service_names(config)?;
     check_services(config)?;
@@ -146,6 +147,22 @@ fn check_cluster_names(config: &ForgeConfig) -> Result<(), ForgeError> {
                 cluster.name,
             )));
         }
+    }
+    Ok(())
+}
+
+/// `runtime.clusterPrefix` must be a DNS label, and every derived
+/// `{prefix}-{cluster}` KIND name must be safe for Docker/Podman.
+///
+/// The prefix flows verbatim into `kind create cluster --name` and the
+/// temporary KIND config filename, so a bad value would otherwise
+/// surface only as a raw tool error during `forge up`.
+fn check_cluster_prefix(config: &ForgeConfig) -> Result<(), ForgeError> {
+    let prefix = &config.spec.runtime.cluster_prefix;
+    check_dns_label(prefix, "runtime.clusterPrefix")?;
+    for cluster in &config.spec.clusters {
+        let derived = crate::cluster::kind::kind_cluster_name(prefix, &cluster.name);
+        check_docker_name(&derived, "derived KIND cluster name")?;
     }
     Ok(())
 }
@@ -1114,6 +1131,44 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("hyphen"), "expected hyphen error, got: {msg}");
+    }
+
+    #[test]
+    fn empty_cluster_prefix_rejected() {
+        let mut config = base_config();
+        config.spec.runtime.cluster_prefix = String::new();
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("clusterPrefix"),
+            "expected clusterPrefix error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_cluster_prefix_rejected() {
+        for bad in ["Forge", "with space", "with/slash", "-lead", "x".repeat(64).as_str()] {
+            let mut config = base_config();
+            config.spec.runtime.cluster_prefix = bad.to_owned();
+            assert!(validate(&config).is_err(), "should reject clusterPrefix {bad:?}");
+        }
+    }
+
+    #[test]
+    fn custom_cluster_prefix_passes() {
+        let mut config = base_config();
+        config.spec.runtime.cluster_prefix = "dev-env2".to_owned();
+        config.spec.clusters = vec![ClusterSpec {
+            name: "hub".to_owned(),
+            nodes: NodeConfig::default(),
+            stacks: Vec::new(),
+            properties: BTreeMap::new(),
+        }];
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]
