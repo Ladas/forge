@@ -35,10 +35,6 @@ pub struct GlobalOptions {
     #[arg(long, global = true)]
     pub runtime: Option<RuntimeProvider>,
 
-    /// Log level (e.g. `info`, `debug`, `trace`).
-    #[arg(long, env = "FORGE_LOG", default_value = "info", global = true)]
-    pub log: String,
-
     /// Output format.
     #[arg(long, default_value = "text", global = true)]
     pub output: OutputFormat,
