@@ -116,55 +116,92 @@ struct SvcDeleteResult {
     dry_run: bool,
 }
 
+/// A service teardown target: service name and container name.
+type SvcTarget = (String, String);
+
 /// Stop services in reverse dependency order.
 fn stop_services(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Result<Vec<SvcDeleteResult>, ForgeError> {
-    if ctx.config.spec.services.is_empty() {
+    let targets = collect_svc_targets(ctx, state)?;
+    if targets.is_empty() {
         return Ok(Vec::new());
     }
     let binary = resolve_binary(ctx, state)?;
-    let mut order = service::dependency_order(&ctx.config.spec.services)?;
-    order.reverse();
     let mut results = Vec::new();
-    for idx in order {
-        let result = stop_one_svc(ctx, state, &binary, idx)?;
+    for (name, cname) in targets {
+        let result = stop_one_svc(ctx, state, &binary, &name, &cname)?;
         results.push(result);
     }
     Ok(results)
 }
 
-/// Stop a single service by index.
+/// Collect service teardown targets from config and state.
+///
+/// Configured services come first, in reverse dependency order, then
+/// state-tracked services no longer present in the config — a service
+/// removed from the config after it was started must still be stopped,
+/// or its container would be orphaned with no supported way to remove
+/// it (`forge service stop` also refuses services outside the config).
+fn collect_svc_targets(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Result<Vec<SvcTarget>, ForgeError> {
+    let mut order = service::dependency_order(&ctx.config.spec.services)?;
+    order.reverse();
+    let mut targets = Vec::new();
+    for idx in order {
+        let svc = ctx
+            .config
+            .spec
+            .services
+            .get(idx)
+            .ok_or_else(|| ForgeError::State("service index out of range".to_owned()))?;
+        let cname = service::container_name(&ctx.config.metadata.name, &svc.name);
+        targets.push((svc.name.clone(), cname));
+    }
+    append_state_only_targets(&mut targets, state);
+    Ok(targets)
+}
+
+/// Append non-Gone state services that are absent from the config.
+///
+/// Entries already marked `Gone` have nothing left to stop; configured
+/// services are stopped regardless since stopping is idempotent.
+fn append_state_only_targets(targets: &mut Vec<SvcTarget>, state: &state::ForgeState) {
+    for svc in &state.services {
+        if svc.phase == ServicePhase::Gone {
+            continue;
+        }
+        if targets.iter().any(|(name, _)| name == &svc.name) {
+            continue;
+        }
+        targets.push((svc.name.clone(), svc.container_name.clone()));
+    }
+}
+
+/// Stop a single service container.
 fn stop_one_svc(
     ctx: &ForgeContext<'_>,
     state: &mut state::ForgeState,
     binary: &str,
-    idx: usize,
+    name: &str,
+    cname: &str,
 ) -> Result<SvcDeleteResult, ForgeError> {
-    let svc = ctx
-        .config
-        .spec
-        .services
-        .get(idx)
-        .ok_or_else(|| ForgeError::State("service index out of range".to_owned()))?;
-    let cname = service::container_name(&ctx.config.metadata.name, &svc.name);
     if ctx.dry_run {
         return Ok(SvcDeleteResult {
-            name: svc.name.clone(),
-            container_name: cname,
+            name: name.to_owned(),
+            container_name: cname.to_owned(),
             dry_run: true,
         });
     }
     let params = service::ServiceParams {
         binary,
-        container_name: &cname,
+        container_name: cname,
         env_name: &ctx.config.metadata.name,
         config_dir: &ctx.config_dir,
         state_dir: &ctx.state_dir,
     };
     service::stop_service(ctx.runner, &params)?;
-    mark_svc_gone(state, &svc.name);
+    mark_svc_gone(state, name);
     Ok(SvcDeleteResult {
-        name: svc.name.clone(),
-        container_name: cname,
+        name: name.to_owned(),
+        container_name: cname.to_owned(),
         dry_run: false,
     })
 }
@@ -519,6 +556,160 @@ spec:
         assert_network_allocation_cleared(dir.path());
         let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("removed network"), "should report removal: {text}");
+    }
+
+    /// Build a config with two dependent services and no clusters.
+    fn test_config_with_services() -> crate::config::ForgeConfig {
+        let yaml = "\
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: test
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: forge
+  clusters: []
+  services:
+    - name: db
+      image: example/db:v1
+    - name: web
+      image: example/web:v1
+      dependsOn:
+        - db
+  stacks: {}
+";
+        serde_yaml::from_str(yaml).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    /// Seed state with running services and a resolved runtime.
+    fn seed_state_with_services(state_dir: &std::path::Path, names: &[&str]) {
+        let mut st = state::empty();
+        st.runtime = Some("docker".to_owned());
+        for name in names {
+            st.services.push(state::ServiceState {
+                name: (*name).to_owned(),
+                container_name: format!("test-{name}"),
+                image: format!("example/{name}:v1"),
+                phase: ServicePhase::Running,
+                health: state::ServiceHealth::Unknown,
+                last_observed: 0,
+            });
+        }
+        state::save(state_dir, &st).unwrap_or_else(|_| std::process::abort());
+    }
+
+    /// Register mock responses for one owned, existing container.
+    fn respond_owned_container(runner: &mut MockRunner, cname: &str) {
+        runner.respond(&format!("docker container inspect {cname}"), ok());
+        runner.respond(
+            &format!("docker container inspect --format {{{{json .Config.Labels}}}} {cname}"),
+            owned_labels(),
+        );
+    }
+
+    /// Build a non-dry-run context over the given runner, config, and dir.
+    fn test_ctx<'env>(
+        runner: &'env MockRunner,
+        config: &'env crate::config::ForgeConfig,
+        dir: &tempfile::TempDir,
+    ) -> ForgeContext<'env> {
+        ForgeContext {
+            runner,
+            config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn down_stops_services_in_reverse_dependency_order() {
+        let dir = test_dir();
+        seed_state_with_services(dir.path(), &["db", "web"]);
+        let config = test_config_with_services();
+        let mut runner = MockRunner::new();
+        runner.respond("docker", ok());
+        respond_owned_container(&mut runner, "test-db");
+        respond_owned_container(&mut runner, "test-web");
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        run(&ctx, false, &mut buf).unwrap_or_else(|_| std::process::abort());
+
+        let stops: Vec<String> = runner.calls_matching("stop").iter().map(ToString::to_string).collect();
+        assert_eq!(
+            stops,
+            vec!["docker stop test-web", "docker stop test-db"],
+            "dependents must stop before their dependencies"
+        );
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert!(
+            st.services.iter().all(|svc| svc.phase == ServicePhase::Gone),
+            "stopped services must be recorded Gone"
+        );
+    }
+
+    #[test]
+    fn down_stops_service_removed_from_config() {
+        let dir = test_dir();
+        // State tracks a service the config no longer lists.
+        seed_state_with_services(dir.path(), &["edge"]);
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("docker", ok());
+        respond_owned_container(&mut runner, "test-edge");
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        run(&ctx, false, &mut buf).unwrap_or_else(|_| std::process::abort());
+
+        assert!(
+            runner.was_called("docker stop test-edge"),
+            "a state-tracked service must be stopped even when absent from config"
+        );
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("stopped service 'edge'"),
+            "should report the stop: {text}"
+        );
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_service(&st, "edge").map(|svc| svc.phase.clone()),
+            Some(ServicePhase::Gone),
+            "the orphaned service must be recorded Gone"
+        );
+    }
+
+    #[test]
+    fn down_aborts_on_foreign_service_container() {
+        let dir = test_dir();
+        seed_state_with_services(dir.path(), &["edge"]);
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("docker", ok());
+        runner.respond("docker container inspect test-edge", ok());
+        runner.respond(
+            "docker container inspect --format {{json .Config.Labels}} test-edge",
+            foreign_labels(),
+        );
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, false, &mut buf);
+
+        assert!(result.is_err(), "an ownership mismatch must abort teardown");
+        assert!(
+            !runner.was_called("docker stop"),
+            "a foreign container must not be stopped"
+        );
     }
 
     /// Labels JSON owned by a different environment.
