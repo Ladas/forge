@@ -163,9 +163,17 @@ fn create_if_missing(
 }
 
 /// Insert or update a cluster's state entry.
+///
+/// An existing entry also has its `kind_name` and `context` refreshed
+/// so a `clusterPrefix` change cannot leave state pointing at a KIND
+/// cluster that no longer matches the one just created.
 fn upsert_cluster_state(st: &mut state::ForgeState, name: &str, kind_name: &str, phase: ClusterPhase) {
     if let Some(cs) = state::find_cluster_mut(st, name) {
         cs.phase = phase;
+        if cs.kind_name != kind_name {
+            kind_name.clone_into(&mut cs.kind_name);
+            cs.context = kind_ops::kubectl_context(kind_name);
+        }
         return;
     }
     st.clusters.push(ClusterState {

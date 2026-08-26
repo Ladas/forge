@@ -215,9 +215,18 @@ fn create_if_missing(
 }
 
 /// Ensure a cluster has an entry in state with the given phase.
+///
+/// An existing entry also has its `kind_name` and `context` refreshed:
+/// after a `clusterPrefix` change the freshly created KIND cluster has
+/// a new name, and keeping the stale one would make `forge down`
+/// delete the wrong cluster and orphan the live one.
 fn ensure_state_entry(state: &mut state::ForgeState, name: &str, kind_name: &str, phase: ClusterPhase) {
     if let Some(cs) = state::find_cluster_mut(state, name) {
         cs.phase = phase;
+        if cs.kind_name != kind_name {
+            kind_name.clone_into(&mut cs.kind_name);
+            cs.context = kind_ops::kubectl_context(kind_name);
+        }
         return;
     }
     state.clusters.push(ClusterState {
@@ -837,6 +846,26 @@ spec:
             !runner.was_called("kind get kubeconfig"),
             "service-free environments should not write kubeconfigs containing client key material"
         );
+    }
+
+    #[test]
+    fn ensure_state_entry_refreshes_stale_kind_name() {
+        let mut st = state::empty();
+        st.clusters.push(ClusterState {
+            name: "hub".to_owned(),
+            kind_name: "forge-hub".to_owned(),
+            context: "kind-forge-hub".to_owned(),
+            phase: ClusterPhase::Gone,
+        });
+
+        // A clusterPrefix change derives a new KIND name for the same
+        // config cluster; the state entry must follow it.
+        ensure_state_entry(&mut st, "hub", "dev-hub", ClusterPhase::Running);
+
+        let cluster = state::find_cluster(&st, "hub").unwrap_or_else(|| std::process::abort());
+        assert_eq!(cluster.kind_name, "dev-hub", "kind name must track the current prefix");
+        assert_eq!(cluster.context, "kind-dev-hub", "context must follow the new kind name");
+        assert_eq!(cluster.phase, ClusterPhase::Running, "phase must be updated");
     }
 
     #[test]
