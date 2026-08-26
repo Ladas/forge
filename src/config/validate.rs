@@ -991,15 +991,45 @@ fn check_cluster_stack_refs(config: &ForgeConfig) -> Result<(), ForgeError> {
 fn check_no_templates(config: &ForgeConfig) -> Result<(), ForgeError> {
     let mut sanitized = config.clone();
     sanitized.spec.stacks.clear();
-    let yaml = serde_yaml::to_string(&sanitized).map_err(|err| ForgeError::Validation(err.to_string()))?;
-    if yaml.contains("{{") && yaml.contains("}}") {
-        return Err(ForgeError::Validation(
-            "template syntax ({{ ... }}) is not supported outside \
-             stack steps"
-                .to_owned(),
-        ));
+    let value = serde_json::to_value(&sanitized).map_err(|err| ForgeError::Validation(err.to_string()))?;
+    if let Some(path) = find_template_in_value(&value, "$") {
+        return Err(ForgeError::Validation(format!(
+            "template syntax ({{{{ ... }}}}) is not supported outside \
+             stack steps (found at {path})"
+        )));
     }
     Ok(())
+}
+
+/// True when a string contains a `{{` followed by a `}}`.
+fn contains_template_token(value: &str) -> bool {
+    value
+        .find("{{")
+        .and_then(|start| value.get(start..))
+        .is_some_and(|rest| rest.contains("}}"))
+}
+
+/// Recursively find the first string (value or key) containing a
+/// template token, returning its dotted path.
+fn find_template_in_value(value: &serde_json::Value, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) if contains_template_token(text) => Some(path.to_owned()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(idx, item)| find_template_in_value(item, &format!("{path}[{idx}]"))),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, item)| {
+            let child = format!("{path}.{key}");
+            if contains_template_token(key) {
+                return Some(child);
+            }
+            find_template_in_value(item, &child)
+        }),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
 }
 
 /// Validate `spec.network.dnsZone` when set.
@@ -1339,6 +1369,48 @@ mod tests {
         assert!(
             msg.contains("template syntax"),
             "templates in service image should be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn split_braces_across_fields_pass() {
+        let mut config = base_config();
+        let mut svc_a = test_service("first");
+        svc_a.args = vec!["prefix{{open".to_owned()];
+        let mut svc_b = test_service("second");
+        svc_b.args = vec!["close}}suffix".to_owned()];
+        config.spec.services = vec![svc_a, svc_b];
+        assert!(
+            validate(&config).is_ok(),
+            "'{{{{' and '}}}}' in unrelated fields form no template expression"
+        );
+    }
+
+    #[test]
+    fn reversed_braces_in_one_value_pass() {
+        let mut config = base_config();
+        let mut svc = test_service("web");
+        svc.args = vec!["close}}then{{open".to_owned()];
+        config.spec.services = vec![svc];
+        assert!(
+            validate(&config).is_ok(),
+            "'}}}}' before '{{{{' in one value forms no template expression"
+        );
+    }
+
+    #[test]
+    fn template_error_reports_offending_path() {
+        let mut config = base_config();
+        let mut svc = test_service("web");
+        svc.args = vec!["{{ cluster.name }}".to_owned()];
+        config.spec.services = vec![svc];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("spec.services[0].args[0]"),
+            "expected offending path in error, got: {msg}"
         );
     }
 
