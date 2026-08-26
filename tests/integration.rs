@@ -79,6 +79,28 @@ fn config_validate_fails_with_invalid_yaml() {
     assert!(result.is_err(), "invalid config should fail: {result:?}");
 }
 
+#[test]
+fn config_parse_error_names_the_file() {
+    let dir = tempfile::tempdir().unwrap_or_else(|_| {
+        std::process::abort();
+        #[expect(unreachable_code, reason = "abort prevents reaching this")]
+        {
+            unreachable!()
+        }
+    });
+    let path = dir.path().join("forge.yaml");
+    std::fs::write(&path, "spec: [not, the, right, shape\n").unwrap_or_else(|_| std::process::abort());
+
+    let Err(err) = config::load(&path) else {
+        std::process::abort();
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("forge.yaml"),
+        "parse error should name the failing file, got: {msg}"
+    );
+}
+
 // ---------------------------------------------------------------
 // F2 CLI parsing tests
 // ---------------------------------------------------------------

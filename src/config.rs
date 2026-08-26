@@ -512,7 +512,11 @@ pub enum StepSpec {
 pub fn load(path: &Path) -> Result<ForgeConfig, ForgeError> {
     let content =
         std::fs::read_to_string(path).map_err(|err| ForgeError::Config(format!("{}: {err}", path.display())))?;
-    let config: ForgeConfig = serde_yaml::from_str(&content)?;
+    // Name the failing file in parse errors too, matching read errors:
+    // with --config or defaults resolution the user cannot otherwise
+    // tell which file was malformed.
+    let config: ForgeConfig =
+        serde_yaml::from_str(&content).map_err(|err| ForgeError::Config(format!("{}: {err}", path.display())))?;
     Ok(config)
 }
 
