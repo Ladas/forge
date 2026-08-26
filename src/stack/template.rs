@@ -158,7 +158,14 @@ fn resolve_stack(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeE
     }
 }
 
-/// Resolve `item` or `item.FIELD`.
+/// Resolve `item` or `item.FIELD[.subfield...]`.
+///
+/// The field path may be arbitrarily deep. Because `resolve_variable`
+/// splits the path with `splitn(3, '.')`, the first field segment lands
+/// in `parts[1]` while any deeper path stays (still dotted) in
+/// `parts[2]`; both are collected and walked through `navigate_value`
+/// so `item.spec.host` navigates into `spec` and then `host` instead of
+/// stopping at `item.spec`.
 fn resolve_item(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeError> {
     let val = ctx
         .item
@@ -167,9 +174,11 @@ fn resolve_item(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeEr
     if parts.len() == 1 {
         return value_to_string(val);
     }
-    let field = parts.get(1).copied().unwrap_or_default();
-    let remaining: Vec<&str> = field.split('.').collect();
-    navigate_value(val, &remaining)
+    let mut segments: Vec<&str> = vec![parts.get(1).copied().unwrap_or_default()];
+    if let Some(rest) = parts.get(2).copied() {
+        segments.extend(rest.split('.'));
+    }
+    navigate_value(val, &segments)
 }
 
 /// Resolve `network.dnsZone` or `network.pool`.
@@ -293,6 +302,31 @@ mod tests {
         ctx.item = Some(serde_json::json!({"host": "10.0.0.1", "port": 8080}));
         let result = render("{{ item.host }}:{{ item.port }}", &ctx).unwrap_or_else(|_| std::process::abort());
         assert_eq!(result, "10.0.0.1:8080", "should access item fields");
+    }
+
+    #[test]
+    fn render_item_nested_field_access() {
+        let mut ctx = test_ctx();
+        ctx.item = Some(serde_json::json!({
+            "spec": { "host": "10.0.0.1", "ports": { "http": 8080 } }
+        }));
+        let result =
+            render("{{ item.spec.host }}:{{ item.spec.ports.http }}", &ctx).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(result, "10.0.0.1:8080", "should navigate arbitrarily deep item fields");
+    }
+
+    #[test]
+    fn render_item_nested_missing_field_fails() {
+        let mut ctx = test_ctx();
+        ctx.item = Some(serde_json::json!({ "spec": { "host": "10.0.0.1" } }));
+        let result = render("{{ item.spec.missing }}", &ctx);
+        assert!(result.is_err(), "missing nested item field should fail");
+        if let Err(ForgeError::Config(msg)) = result {
+            assert!(
+                msg.contains("field 'missing' not found"),
+                "should report the missing nested field, got: {msg}"
+            );
+        }
     }
 
     #[test]
