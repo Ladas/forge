@@ -50,7 +50,7 @@ test:
 	cargo test --features test-support $(_NOCAPTURE)
 
 mutants:
-	cargo mutants
+	cargo mutants --features test-support
 
 # -------------------------------------------------------------------
 # Prerequisites
@@ -112,13 +112,14 @@ audit: check-prereqs-audit
 	cargo deny check
 
 coverage:
-	cargo llvm-cov --html --output-dir target/coverage \
+	cargo llvm-cov --features test-support \
+		--html --output-dir target/coverage \
 		--ignore-filename-regex 'src/main\.rs' \
 		--fail-under-lines 90 \
 		--fail-under-regions 80
 
 coverage-check:
-	cargo llvm-cov \
+	cargo llvm-cov --features test-support \
 		--ignore-filename-regex 'src/main\.rs' \
 		--fail-under-lines 90 \
 		--fail-under-regions 80
