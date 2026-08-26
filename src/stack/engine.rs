@@ -870,13 +870,16 @@ fn render_vec(items: &[String], tpl: &TemplateContext) -> Result<Vec<String>, Fo
 
 /// Verify content matches an expected SHA-256 hex digest.
 ///
+/// The comparison is case-insensitive so uppercase or mixed-case
+/// pins (which config validation accepts) verify correctly.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError::Command`] if the digest does not match.
 pub fn verify_sha256(content: &[u8], expected: &str) -> Result<(), ForgeError> {
     let digest = sha2::Sha256::digest(content);
     let actual = format!("{digest:x}");
-    if actual == expected {
+    if actual.eq_ignore_ascii_case(expected) {
         return Ok(());
     }
     Err(ForgeError::Command {
@@ -1133,6 +1136,19 @@ mod tests {
         assert!(verify_sha256(b"hello", &bad).is_err(), "should reject bad digest");
         let good = format!("{:x}", sha2::Sha256::digest(b"hello"));
         assert!(verify_sha256(b"hello", &good).is_ok(), "should accept correct digest");
+    }
+
+    #[test]
+    fn verify_sha256_accepts_uppercase_pin() {
+        let upper = format!("{:X}", sha2::Sha256::digest(b"hello"));
+        assert!(
+            upper.bytes().any(|ch| ch.is_ascii_uppercase()),
+            "test digest should contain uppercase hex"
+        );
+        assert!(
+            verify_sha256(b"hello", &upper).is_ok(),
+            "uppercase pin must verify against lowercase computed digest"
+        );
     }
 
     #[test]
