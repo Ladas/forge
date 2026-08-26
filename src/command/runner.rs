@@ -126,16 +126,22 @@ fn run_process(cmd: &mut std::process::Command, spec: &CommandSpec) -> Result<st
 }
 
 /// Spawn a child process and write data to its standard input.
+///
+/// Stdin is written from a separate thread while the parent drains
+/// stdout/stderr via `wait_with_output`.  Writing synchronously first
+/// would deadlock once the child fills the OS pipe buffer with output
+/// before consuming all of its stdin (e.g. `kubectl apply -f -` on a
+/// large multi-document manifest).
 fn run_with_stdin(
     cmd: &mut std::process::Command,
     data: &[u8],
     spec: &CommandSpec,
 ) -> Result<std::process::Output, ForgeError> {
     let mut child = cmd.spawn().map_err(|err| command_error(spec, &err))?;
-    let write_result = pipe_stdin(&mut child, data);
+    let writer = spawn_stdin_writer(&mut child, data);
     let output = child.wait_with_output().map_err(|err| command_error(spec, &err))?;
 
-    match write_result {
+    match join_stdin_writer(writer) {
         Ok(()) => Ok(output),
         // A child can reject the command and close stdin before the parent
         // finishes writing. Preserve its exit status and captured stderr so
@@ -145,14 +151,27 @@ fn run_with_stdin(
     }
 }
 
-/// Write data to a child process's stdin and close the handle.
-fn pipe_stdin(child: &mut std::process::Child, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
+/// Handle to a background thread writing a child's stdin.
+type StdinWriter = std::thread::JoinHandle<std::io::Result<()>>;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(data)?;
+/// Spawn a thread that writes data to the child's stdin and closes it.
+fn spawn_stdin_writer(child: &mut std::process::Child, data: &[u8]) -> Option<StdinWriter> {
+    let mut stdin = child.stdin.take()?;
+    let owned = data.to_vec();
+    Some(std::thread::spawn(move || {
+        use std::io::Write as _;
+        stdin.write_all(&owned)
+    }))
+}
+
+/// Join the stdin writer thread, mapping a panic to an IO error.
+fn join_stdin_writer(writer: Option<StdinWriter>) -> std::io::Result<()> {
+    match writer {
+        None => Ok(()),
+        Some(handle) => handle
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("stdin writer thread panicked"))),
     }
-    Ok(())
 }
 
 /// Convert a process output reference into a [`CommandOutput`].
@@ -425,6 +444,30 @@ mod tests {
 
         assert_eq!(output.status, 23);
         assert_eq!(output.stderr, "primary failure");
+    }
+
+    #[test]
+    fn system_runner_survives_child_flooding_output_before_reading_stdin() {
+        // The child emits far more than the OS pipe buffer (~64 KiB)
+        // before it reads any stdin. A parent that writes all stdin
+        // before draining output deadlocks here.
+        let flood: usize = 256 * 1024;
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), format!("head -c {flood} /dev/zero; cat").into()],
+            env: BTreeMap::new(),
+            stdin: Some(vec![b'x'; flood]),
+            redact: Vec::new(),
+        };
+
+        let output = SystemRunner.run(&spec).unwrap_or_else(|_| std::process::abort());
+
+        assert_eq!(output.status, 0);
+        assert_eq!(
+            output.stdout.len(),
+            flood.saturating_mul(2),
+            "child should echo all stdin after the flood"
+        );
     }
 
     #[test]
