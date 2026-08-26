@@ -1,12 +1,13 @@
 //! Advisory file locking for exclusive state access.
 //!
-//! Uses [`fs2::FileExt`] for cross-platform advisory locks.
-//! The lock is released automatically when the [`StateLock`] guard
-//! is dropped.
+//! Uses the standard library's advisory file locks ([`File::lock`]
+//! and [`File::try_lock`]).  The lock is released automatically when
+//! the [`StateLock`] guard is dropped.
 
-use std::{fs::File, path::Path};
-
-use fs2::FileExt as _;
+use std::{
+    fs::{File, TryLockError},
+    path::Path,
+};
 
 use crate::error::ForgeError;
 
@@ -61,14 +62,14 @@ fn open_lock_file(path: &Path) -> Result<File, ForgeError> {
 /// notice is printed to stderr (a `forge up` can hold the lock for
 /// minutes) before falling back to the blocking lock.
 fn lock_exclusive(file: &File, path: &Path) -> Result<(), ForgeError> {
-    match file.try_lock_exclusive() {
+    match file.try_lock() {
         Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(TryLockError::WouldBlock) => {
             report_waiting(path);
-            file.lock_exclusive()
+            file.lock()
                 .map_err(|block_err| ForgeError::Lock(format!("cannot acquire lock: {block_err}")))
         },
-        Err(err) => Err(ForgeError::Lock(format!("cannot acquire lock: {err}"))),
+        Err(TryLockError::Error(err)) => Err(ForgeError::Lock(format!("cannot acquire lock: {err}"))),
     }
 }
 
@@ -146,22 +147,19 @@ mod tests {
 
     #[test]
     fn lock_excludes_second_handle_until_guard_drops() {
-        use fs2::FileExt as _;
-
         let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
         let state_dir = dir.path().join("state");
         let guard = acquire(&state_dir).unwrap_or_else(|_| std::process::abort());
         // Advisory locks are per file handle, so a second handle to the
         // same path must contend even within one process.
         let second = open_lock_file(&lock_path(&state_dir)).unwrap_or_else(|_| std::process::abort());
-        let contended = second.try_lock_exclusive().err();
-        assert_eq!(
-            contended.map(|err| err.kind()),
-            Some(std::io::ErrorKind::WouldBlock),
+        let contended_would_block = matches!(second.try_lock(), Err(TryLockError::WouldBlock));
+        assert!(
+            contended_would_block,
             "second handle must not acquire the lock while the guard is held"
         );
         drop(guard);
-        second.try_lock_exclusive().unwrap_or_else(|_| std::process::abort());
+        second.try_lock().unwrap_or_else(|_| std::process::abort());
     }
 
     #[test]
