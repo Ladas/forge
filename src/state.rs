@@ -280,8 +280,13 @@ pub fn load(state_dir: &Path) -> Result<ForgeState, ForgeError> {
 pub fn save(state_dir: &Path, state: &ForgeState) -> Result<(), ForgeError> {
     ensure_dir(state_dir)?;
     let tmp = write_temp(state_dir, state)?;
-    fsync_file(&tmp)?;
-    rename_state(&tmp, &state_path(state_dir))
+    fsync_path(&tmp)?;
+    rename_state(&tmp, &state_path(state_dir))?;
+    // The rename itself lives in the directory entry: without syncing
+    // the directory a power loss can roll the rename back, leaving
+    // state.json describing clusters and containers that no longer
+    // match reality.
+    fsync_path(state_dir)
 }
 
 /// Ensure the state directory exists.
@@ -457,8 +462,8 @@ fn write_temp(state_dir: &Path, state: &ForgeState) -> Result<PathBuf, ForgeErro
     Ok(tmp)
 }
 
-/// Fsync a file by path.
-fn fsync_file(path: &Path) -> Result<(), ForgeError> {
+/// Fsync a file or directory by path.
+fn fsync_path(path: &Path) -> Result<(), ForgeError> {
     let file = std::fs::File::open(path)
         .map_err(|err| ForgeError::State(format!("cannot open for fsync {}: {err}", path.display())))?;
     file.sync_all()
