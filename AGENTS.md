@@ -129,7 +129,7 @@ Forge-specific notes:
 - `single_char_lifetime_names` lint enforced: use
   descriptive lifetime names (`'ctx`, `'env`, `'svc`)
 - `too_many_lines` threshold: 30 lines per function
-- `cognitive_complexity` threshold: 12
+- `cognitive_complexity` threshold: 25
 - `clippy.toml` sets `msrv = "1.96"`
 - Coverage thresholds: 90% lines, 80% regions
 
