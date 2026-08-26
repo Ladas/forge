@@ -130,13 +130,27 @@ const KUBECONFIG_FILE_MODE: u32 = 0o600;
 /// inheriting the process umask, which on a default umask 022 would publish
 /// admin credentials to every account on the host.
 fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
 
     std::fs::create_dir_all(dir).map_err(ForgeError::Io)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(KUBECONFIG_DIR_MODE)).map_err(ForgeError::Io)?;
+    write_owner_only(&dir.join("config"), content)
+}
 
-    let final_path = dir.join("config");
-    let tmp_path = dir.join("config.tmp");
+/// Write kubeconfig content atomically to an arbitrary path, mode 0600.
+///
+/// Shares the rationale of [`write_kubeconfig_file`]: the content grants
+/// cluster-admin, so it must never inherit the process umask. The target
+/// may live in a directory Forge does not own (e.g. a user-supplied
+/// `--out-file`), so only the file mode is enforced, not the directory's.
+///
+/// # Errors
+///
+/// Returns [`ForgeError::Io`] if the file cannot be written.
+pub fn write_owner_only(path: &Path, content: &str) -> Result<(), ForgeError> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let tmp_path = tmp_sibling(path);
     // Mode is applied at create() so the key material is never briefly readable.
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -153,8 +167,15 @@ fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
     std::io::Write::write_all(&mut &file, content.as_bytes()).map_err(ForgeError::Io)?;
     file.sync_all().map_err(ForgeError::Io)?;
     drop(file);
-    std::fs::rename(&tmp_path, &final_path).map_err(ForgeError::Io)?;
+    std::fs::rename(&tmp_path, path).map_err(ForgeError::Io)?;
     Ok(())
+}
+
+/// Build the temporary sibling path `{path}.tmp` for atomic writes.
+fn tmp_sibling(path: &Path) -> std::path::PathBuf {
+    let mut os_path = path.as_os_str().to_owned();
+    os_path.push(".tmp");
+    std::path::PathBuf::from(os_path)
 }
 
 #[cfg(test)]

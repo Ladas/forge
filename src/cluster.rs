@@ -219,7 +219,9 @@ fn write_kubeconfig(
     format: &OutputFormat,
 ) -> Result<(), ForgeError> {
     if let Some(path) = output_path {
-        std::fs::write(path, kubeconfig).map_err(ForgeError::Io)?;
+        // The kubeconfig grants cluster-admin, so it must be 0600 rather
+        // than inheriting the umask (0644 by default).
+        kubeconfig::write_owner_only(path, kubeconfig)?;
         return report_text_or_json(writer, &format!("kubeconfig written to {}", path.display()), format);
     }
     output::write_text(writer, kubeconfig)?;
@@ -472,6 +474,37 @@ spec:
             Some("pod-a\n"),
             "envelope should carry kubectl stdout: {text}"
         );
+    }
+
+    #[test]
+    fn kubeconfig_out_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind get kubeconfig --name forge-hub", stdout_ok("apiVersion: v1\n"));
+        let ctx = test_ctx(&runner, &config, &dir);
+        let out_path = dir.path().join("hub.kubeconfig");
+        let cmd = ClusterCommand::Kubeconfig {
+            name: "hub".to_owned(),
+            out_file: Some(out_path.clone()),
+        };
+
+        let text = run_dispatch(&ctx, &cmd);
+
+        assert!(
+            text.contains("kubeconfig written to"),
+            "should report the write: {text}"
+        );
+        let content = std::fs::read_to_string(&out_path).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(content, "apiVersion: v1\n", "out-file should carry the kubeconfig");
+        let mode = std::fs::metadata(&out_path)
+            .unwrap_or_else(|_| std::process::abort())
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "out-file carries admin credentials and must be 0600");
     }
 
     #[test]
