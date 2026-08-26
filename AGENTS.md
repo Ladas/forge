@@ -155,8 +155,8 @@ integration tests under `tests/`.
   all operations (runner, config, state_dir, format,
   dry_run)
 - **State machine**: clusters track phase transitions
-  (Creating, Ready, Gone); services track Running,
-  Stopped
+  (Creating, Running, Deleting, Gone); services track
+  Running, Unhealthy, Stopped, Gone
 - **Reverse-order teardown**: `down` deletes services
   then clusters in reverse dependency order
 - **Deterministic naming**: container names derived

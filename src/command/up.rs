@@ -200,6 +200,10 @@ fn dry_run_result(name: &str, kind_name: &str) -> ClusterResult {
 }
 
 /// Create a cluster if it doesn't already exist. Returns true if created.
+///
+/// A `Creating` entry is persisted before `kind create` runs: creation
+/// takes minutes, and a crash mid-create would otherwise leave real
+/// KIND containers with no state record for `forge down` to act on.
 fn create_if_missing(
     ctx: &ForgeContext<'_>,
     kind_name: &str,
@@ -211,6 +215,8 @@ fn create_if_missing(
         ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
         return Ok(false);
     }
+    ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Creating);
+    checkpoint(ctx, state)?;
     kind_ops::create_cluster(ctx.runner, kind_name, &cluster.nodes, &ctx.state_dir, docker_network)?;
     ensure_state_entry(state, &cluster.name, kind_name, ClusterPhase::Running);
     Ok(true)
@@ -722,6 +728,43 @@ users:
         let text = run_up(&ctx);
         assert!(!runner.was_called("kind create"), "should not call kind create");
         assert!(text.contains("already exists"), "output should note existing: {text}");
+    }
+
+    #[test]
+    fn up_persists_creating_phase_when_create_fails() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("docker version", docker_ok());
+        runner.respond("kind get clusters", empty_ok());
+        // The generic kind responder covers `kind create cluster`.
+        runner.respond(
+            "kind",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "create blew up\n".to_owned(),
+            },
+        );
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, &mut buf);
+
+        assert!(result.is_err(), "a failing create should fail the run");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Creating),
+            "an interrupted create must leave a Creating record for down"
+        );
     }
 
     #[test]

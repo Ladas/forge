@@ -56,14 +56,20 @@ fn handle_create(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> 
 }
 
 /// Handle `cluster delete`.
+///
+/// A tracked cluster is marked `Deleting` (and saved) before the
+/// delete runs, so a crash mid-delete leaves a diagnosable record
+/// instead of an entry still claiming `Running`.
 fn handle_delete(ctx: &ForgeContext<'_>, name: &str, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
         return report_dry_run(writer, "would delete cluster", name, &kind_name, &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
+    let mut st = state::load(&ctx.state_dir)?;
+    set_phase_saved(ctx, &mut st, name, ClusterPhase::Deleting)?;
     kind_ops::delete_cluster(ctx.runner, &kind_name)?;
-    update_phase_gone(ctx, name)?;
+    set_phase_saved(ctx, &mut st, name, ClusterPhase::Gone)?;
     report_deleted(writer, name, &kind_name, &ctx.format)
 }
 
@@ -145,7 +151,10 @@ fn cluster_kind_name(ctx: &ForgeContext<'_>, name: &str) -> String {
 /// Create a cluster if it doesn't already exist. Returns true if created.
 ///
 /// A cluster that already exists in KIND is adopted into state as
-/// `Running` so bulk teardown (`forge down`) still tracks it.
+/// `Running` so bulk teardown (`forge down`) still tracks it. Before a
+/// real create, a `Creating` entry is persisted: creation takes
+/// minutes, and a crash mid-create would otherwise leave real KIND
+/// containers with no state record.
 fn create_if_missing(
     ctx: &ForgeContext<'_>,
     kind_name: &str,
@@ -157,6 +166,8 @@ fn create_if_missing(
         upsert_cluster_state(st, name, kind_name, ClusterPhase::Running);
         return Ok(false);
     }
+    upsert_cluster_state(st, name, kind_name, ClusterPhase::Creating);
+    state::save(&ctx.state_dir, st)?;
     kind_ops::create_cluster(ctx.runner, kind_name, nodes, &ctx.state_dir, None)?;
     upsert_cluster_state(st, name, kind_name, ClusterPhase::Running);
     Ok(true)
@@ -184,13 +195,21 @@ fn upsert_cluster_state(st: &mut state::ForgeState, name: &str, kind_name: &str,
     });
 }
 
-/// Update a cluster's phase to `Gone` in state.
-fn update_phase_gone(ctx: &ForgeContext<'_>, name: &str) -> Result<(), ForgeError> {
-    let mut st = state::load(&ctx.state_dir)?;
-    if let Some(cs) = state::find_cluster_mut(&mut st, name) {
-        cs.phase = ClusterPhase::Gone;
-    }
-    state::save(&ctx.state_dir, &st)
+/// Set a tracked cluster's phase in state and persist it.
+///
+/// A cluster with no state entry (deleted purely by its derived KIND
+/// name) is left unrecorded; nothing is saved for it.
+fn set_phase_saved(
+    ctx: &ForgeContext<'_>,
+    st: &mut state::ForgeState,
+    name: &str,
+    phase: ClusterPhase,
+) -> Result<(), ForgeError> {
+    let Some(cs) = state::find_cluster_mut(st, name) else {
+        return Ok(());
+    };
+    cs.phase = phase;
+    state::save(&ctx.state_dir, st)
 }
 
 /// Report a kubectl invocation's output, propagating its exit status.
@@ -421,6 +440,81 @@ spec:
             cluster.map(|cs| cs.phase.clone()),
             Some(ClusterPhase::Running),
             "adopted cluster should be Running"
+        );
+    }
+
+    /// Seed state with a running hub cluster.
+    fn seed_running_hub(state_dir: &std::path::Path) {
+        let mut st = state::empty();
+        st.clusters.push(ClusterState {
+            name: "hub".to_owned(),
+            kind_name: "forge-hub".to_owned(),
+            context: "kind-forge-hub".to_owned(),
+            phase: ClusterPhase::Running,
+        });
+        state::save(state_dir, &st).unwrap_or_else(|_| std::process::abort());
+    }
+
+    #[test]
+    fn create_persists_creating_phase_when_create_fails() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind get clusters", stdout_ok(""));
+        runner.respond(
+            "kind",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "create blew up\n".to_owned(),
+            },
+        );
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        let result = dispatch(&ctx, &ClusterCommand::Create { name: "hub".to_owned() }, &mut buf);
+
+        assert!(result.is_err(), "a failing create should fail the command");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Creating),
+            "an interrupted create must leave a Creating record for down"
+        );
+    }
+
+    #[test]
+    fn delete_persists_deleting_phase_when_delete_fails() {
+        let dir = test_dir();
+        seed_running_hub(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kind",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "delete blew up\n".to_owned(),
+            },
+        );
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        let result = dispatch(
+            &ctx,
+            &ClusterCommand::Delete {
+                name: "hub".to_owned(),
+                force: false,
+            },
+            &mut buf,
+        );
+
+        assert!(result.is_err(), "a failing delete should fail the command");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Deleting),
+            "an interrupted delete must leave a Deleting record"
         );
     }
 

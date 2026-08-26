@@ -86,13 +86,15 @@ pub struct ClusterState {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ClusterPhase {
-    /// Cluster creation is pending.
+    /// Cluster creation is pending. Reserved: accepted in state files
+    /// but not currently written by any command.
     Pending,
-    /// Cluster is being created.
+    /// Cluster is being created. Persisted before `kind create` runs
+    /// so a crash mid-create leaves a record for `forge down`.
     Creating,
     /// Cluster is running.
     Running,
-    /// Cluster is being deleted.
+    /// Cluster is being deleted. Persisted before `kind delete` runs.
     Deleting,
     /// Cluster has been deleted or failed.
     Gone,
@@ -156,9 +158,11 @@ pub struct ServiceState {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServicePhase {
-    /// Container creation pending.
+    /// Container creation pending. Reserved: accepted in state files
+    /// but not currently written by any command.
     Pending,
-    /// Container starting.
+    /// Container starting. Reserved: accepted in state files but not
+    /// currently written by any command.
     Starting,
     /// Container running normally.
     Running,
@@ -206,7 +210,8 @@ pub struct StackState {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StackPhase {
-    /// Stack application is pending.
+    /// Stack application is pending. Reserved: accepted in state files
+    /// but not currently written by any command.
     Pending,
     /// Stack is being applied.
     Applying,

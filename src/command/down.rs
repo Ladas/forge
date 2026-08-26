@@ -73,6 +73,10 @@ fn collect_targets(state: &state::ForgeState) -> Vec<(String, String)> {
 }
 
 /// Delete a single cluster or report dry-run.
+///
+/// The `Deleting` phase is persisted before `kind delete` runs so a
+/// crash mid-delete leaves a diagnosable record instead of a cluster
+/// still marked `Running`.
 fn delete_one(
     ctx: &ForgeContext<'_>,
     state: &mut state::ForgeState,
@@ -86,8 +90,10 @@ fn delete_one(
             dry_run: true,
         });
     }
+    set_cluster_phase(state, name, ClusterPhase::Deleting);
+    checkpoint(ctx, state)?;
     kind_ops::delete_cluster(ctx.runner, kind_name)?;
-    mark_gone(state, name);
+    set_cluster_phase(state, name, ClusterPhase::Gone);
     Ok(DeleteResult {
         name: name.to_owned(),
         kind_name: kind_name.to_owned(),
@@ -95,10 +101,10 @@ fn delete_one(
     })
 }
 
-/// Mark a cluster as `Gone` in state.
-fn mark_gone(state: &mut state::ForgeState, name: &str) {
+/// Set a tracked cluster's lifecycle phase in state.
+fn set_cluster_phase(state: &mut state::ForgeState, name: &str, phase: ClusterPhase) {
     if let Some(cs) = state::find_cluster_mut(state, name) {
-        cs.phase = ClusterPhase::Gone;
+        cs.phase = phase;
     }
 }
 
@@ -457,6 +463,34 @@ spec:
         assert!(runner.was_called("kind delete cluster"), "should call kind delete");
         let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("deleted"), "should say deleted: {text}");
+    }
+
+    #[test]
+    fn down_persists_deleting_phase_when_delete_fails() {
+        let dir = test_dir();
+        seed_state(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kind",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "delete blew up\n".to_owned(),
+            },
+        );
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, false, &mut buf);
+
+        assert!(result.is_err(), "a failing delete should fail the run");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Deleting),
+            "an interrupted delete must leave a Deleting record"
+        );
     }
 
     #[test]
