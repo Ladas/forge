@@ -81,6 +81,14 @@ fn handle_kubeconfig(
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
+    // Fetching the kubeconfig is read-only, but writing the out-file is
+    // not: a dry run must never truncate an existing kubeconfig.
+    if ctx.dry_run
+        && let Some(path) = output_path
+    {
+        let msg = format!("would write kubeconfig for '{name}' to {}", path.display());
+        return report_text_or_json(writer, &msg, &ctx.format);
+    }
     let kubeconfig = kind_ops::get_kubeconfig(ctx.runner, &kind_name)?;
     write_kubeconfig(writer, output_path, &kubeconfig, &ctx.format)
 }
@@ -505,6 +513,30 @@ spec:
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "out-file carries admin credentials and must be 0600");
+    }
+
+    #[test]
+    fn kubeconfig_dry_run_does_not_touch_out_file() {
+        let dir = test_dir();
+        let config = test_config();
+        let runner = MockRunner::new();
+        let mut ctx = test_ctx(&runner, &config, &dir);
+        ctx.dry_run = true;
+        let out_path = dir.path().join("existing.kubeconfig");
+        std::fs::write(&out_path, "original content\n").unwrap_or_else(|_| std::process::abort());
+        let cmd = ClusterCommand::Kubeconfig {
+            name: "hub".to_owned(),
+            out_file: Some(out_path.clone()),
+        };
+
+        let text = run_dispatch(&ctx, &cmd);
+
+        assert!(
+            text.contains("would write kubeconfig"),
+            "should report planned write: {text}"
+        );
+        let content = std::fs::read_to_string(&out_path).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(content, "original content\n", "dry run must not overwrite the out-file");
     }
 
     #[test]
