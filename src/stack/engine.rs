@@ -398,6 +398,26 @@ fn resolve_exec_arg(idx: usize, arg: &str, config_dir: &Path) -> Result<String, 
     }
 }
 
+/// Parameters for one capture polling loop.
+struct CaptureParams<'step> {
+    /// Resource to read (e.g. `svc/gateway`).
+    resource: &'step str,
+    /// Optional namespace.
+    namespace: Option<&'step str>,
+    /// Jsonpath expression to extract.
+    jsonpath: &'step str,
+    /// Capture key to store the value under.
+    key: &'step str,
+}
+
+/// Outcome of one capture attempt.
+enum CaptureAttempt {
+    /// kubectl succeeded; trimmed stdout (possibly empty).
+    Value(String),
+    /// kubectl exited non-zero (e.g. resource not found yet); retryable.
+    Retryable(String),
+}
+
 /// Capture a kubectl jsonpath result into pending state.
 fn execute_capture(runner: &dyn CommandRunner, step: &StepSpec, sc: &mut StepContext) -> Result<(), ForgeError> {
     let StepSpec::Capture {
@@ -416,34 +436,73 @@ fn execute_capture(runner: &dyn CommandRunner, step: &StepSpec, sc: &mut StepCon
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| ForgeError::Config("capture timeout overflows system clock".to_owned()))?;
+    let params = CaptureParams {
+        resource,
+        namespace: namespace.as_deref(),
+        jsonpath,
+        key,
+    };
+    capture_with_retry(runner, sc, &params, deadline, interval)
+}
+
+/// Poll kubectl until a non-empty value is captured or the deadline passes.
+///
+/// A non-zero kubectl exit (e.g. the resource is still being created and
+/// `kubectl get` reports `NotFound`) is treated as retryable, just like an
+/// empty jsonpath result; only reaching the deadline turns either case
+/// into a hard error, which carries the last kubectl stderr when one
+/// was seen.
+fn capture_with_retry(
+    runner: &dyn CommandRunner,
+    sc: &mut StepContext,
+    params: &CaptureParams<'_>,
+    deadline: Instant,
+    interval: Duration,
+) -> Result<(), ForgeError> {
+    let mut last_failure: Option<String>;
     loop {
-        let value = run_capture_attempt(runner, sc, resource, namespace.as_deref(), jsonpath)?;
-        if !value.is_empty() {
-            sc.pending_captures.insert(key.to_owned(), value);
-            return Ok(());
+        match run_capture_attempt(runner, sc, params)? {
+            CaptureAttempt::Value(value) if !value.is_empty() => {
+                sc.pending_captures.insert(params.key.to_owned(), value);
+                return Ok(());
+            },
+            CaptureAttempt::Value(_) => last_failure = None,
+            CaptureAttempt::Retryable(stderr) => last_failure = Some(stderr),
         }
         if Instant::now() >= deadline {
-            return Err(ForgeError::Command {
-                program: "kubectl get".to_owned(),
-                message: format!("capture key '{key}': empty result from jsonpath '{jsonpath}' before timeout"),
-            });
+            return Err(capture_timeout_error(params, last_failure.as_deref()));
         }
         sleep_capture_interval(interval);
     }
 }
 
 /// Run one kubectl/jsonpath capture attempt.
+///
+/// Only a failure to execute kubectl at all is a hard error; a
+/// non-zero exit is reported as [`CaptureAttempt::Retryable`].
 fn run_capture_attempt(
     runner: &dyn CommandRunner,
     sc: &StepContext,
-    resource: &str,
-    namespace: Option<&str>,
-    jsonpath: &str,
-) -> Result<String, ForgeError> {
-    let spec = steps::kubectl_get_jsonpath(&sc.kube_context, resource, namespace, jsonpath);
+    params: &CaptureParams<'_>,
+) -> Result<CaptureAttempt, ForgeError> {
+    let spec = steps::kubectl_get_jsonpath(&sc.kube_context, params.resource, params.namespace, params.jsonpath);
     let output = runner.run(&spec)?;
-    steps::check_success(&output, "kubectl get")?;
-    Ok(output.stdout.trim().to_owned())
+    if output.status != 0 {
+        return Ok(CaptureAttempt::Retryable(output.stderr.trim().to_owned()));
+    }
+    Ok(CaptureAttempt::Value(output.stdout.trim().to_owned()))
+}
+
+/// Build the timeout error for a capture that never produced a value.
+fn capture_timeout_error(params: &CaptureParams<'_>, last_failure: Option<&str>) -> ForgeError {
+    let detail = last_failure.map_or_else(
+        || format!("empty result from jsonpath '{}'", params.jsonpath),
+        |stderr| format!("kubectl get failed: {stderr}"),
+    );
+    ForgeError::Command {
+        program: "kubectl get".to_owned(),
+        message: format!("capture key '{}': {detail} before timeout", params.key),
+    }
 }
 
 /// Sleep between capture attempts.
@@ -1623,6 +1682,38 @@ mod tests {
         let result = execute_capture(&runner, &step, &mut sc);
         assert!(result.is_err(), "empty capture should fail");
         assert!(sc.pending_captures.is_empty(), "should not store empty value");
+    }
+
+    #[test]
+    fn capture_step_retries_kubectl_failure_until_deadline() {
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kubectl",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "Error from server (NotFound): services \"provider-gateway\" not found".to_owned(),
+            },
+        );
+        let mut sc = make_step_context();
+        let step = StepSpec::Capture {
+            resource: "svc/provider-gateway".to_owned(),
+            namespace: None,
+            jsonpath: "{.status.loadBalancer.ingress[0].ip}".to_owned(),
+            key: "gw-ip".to_owned(),
+            timeout: "30ms".to_owned(),
+            interval: "1ms".to_owned(),
+        };
+        let Err(err) = execute_capture(&runner, &step, &mut sc) else {
+            std::process::abort();
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("NotFound"),
+            "timeout error must carry the last kubectl stderr: {message}"
+        );
+        assert!(runner.call_count() > 1, "non-zero kubectl exit must be retried");
+        assert!(sc.pending_captures.is_empty(), "should not store a value on failure");
     }
 
     #[test]
