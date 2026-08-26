@@ -34,6 +34,7 @@ pub fn validate(config: &ForgeConfig) -> Result<(), ForgeError> {
     check_stack_steps(config)?;
     check_dns_zone(config)?;
     check_coredns_requires_cross_cluster(config)?;
+    check_environment_network_requires_cross_cluster(config)?;
     check_cross_cluster_provider(config)?;
     check_no_templates(config)?;
     Ok(())
@@ -1014,6 +1015,28 @@ fn check_coredns_requires_cross_cluster(config: &ForgeConfig) -> Result<(), Forg
                     "stack {name:?}: core-dns-forward requires spec.network.crossCluster: true"
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Any `network: environment` service requires `spec.network.crossCluster: true`.
+///
+/// Such a service is attached to the shared `{env}-net` container
+/// network, which `forge up` only creates when cross-cluster networking
+/// is enabled; without this rule the mismatch surfaces as a raw
+/// "network not found" docker error after clusters were already created.
+fn check_environment_network_requires_cross_cluster(config: &ForgeConfig) -> Result<(), ForgeError> {
+    let has_cross = config.spec.network.as_ref().is_some_and(|n| n.cross_cluster);
+    if has_cross {
+        return Ok(());
+    }
+    for svc in &config.spec.services {
+        if svc.network == NetworkMode::Environment {
+            return Err(ForgeError::Validation(format!(
+                "service {:?}: network: environment requires spec.network.crossCluster: true",
+                svc.name,
+            )));
         }
     }
     Ok(())
@@ -2055,6 +2078,53 @@ spec:
         };
         let msg = err.to_string();
         assert!(msg.contains("crossCluster"), "should mention crossCluster: {msg}");
+    }
+
+    #[test]
+    fn environment_network_service_requires_cross_cluster() {
+        let mut config = base_config();
+        let mut svc = test_service("edge");
+        svc.network = NetworkMode::Environment;
+        config.spec.services = vec![svc];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("edge") && msg.contains("crossCluster"),
+            "expected crossCluster requirement error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn environment_network_service_rejected_when_cross_cluster_false() {
+        let mut config = base_config();
+        config.spec.network = Some(NetworkConfig {
+            cross_cluster: false,
+            dns_zone: None,
+        });
+        let mut svc = test_service("edge");
+        svc.network = NetworkMode::Environment;
+        config.spec.services = vec![svc];
+        assert!(
+            validate(&config).is_err(),
+            "crossCluster: false should not satisfy a network: environment service"
+        );
+    }
+
+    #[test]
+    fn environment_network_service_passes_with_cross_cluster() {
+        let mut config = base_config();
+        config.spec.network = Some(NetworkConfig {
+            cross_cluster: true,
+            dns_zone: None,
+        });
+        let mut svc = test_service("edge");
+        svc.network = NetworkMode::Environment;
+        config.spec.services = vec![svc];
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]
