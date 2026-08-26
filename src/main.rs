@@ -86,33 +86,40 @@ fn build_context<'ctx>(
     cli: &'ctx Cli,
     runner: &'ctx dyn runner::CommandRunner,
     config: &'ctx forge::config::ForgeConfig,
-) -> ForgeContext<'ctx> {
-    ForgeContext {
+) -> Result<ForgeContext<'ctx>, ForgeError> {
+    Ok(ForgeContext {
         runner,
         config,
         state_dir: cli.global.state_dir.clone(),
-        config_dir: config_dir_from_path(&cli.global.config),
+        config_dir: config_dir_from_path(&cli.global.config)?,
         format: cli.global.output.clone(),
         dry_run: cli.global.dry_run,
-    }
+    })
 }
 
 /// Derive the config directory from the config file path.
 ///
-/// Canonicalizes the result so that Docker volume bind-mounts
-/// receive absolute paths instead of relative ones.
-fn config_dir_from_path(path: &std::path::Path) -> std::path::PathBuf {
-    let parent = path
-        .parent()
-        .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
-    std::fs::canonicalize(&parent).unwrap_or(parent)
+/// Canonicalizes the result so that Docker volume bind-mounts and
+/// containment checks receive absolute paths instead of relative
+/// ones.  A bare filename (the default `forge.yaml`) has an empty
+/// parent, which is treated as the current directory.  A parent
+/// that cannot be canonicalized is an error: falling back to a
+/// relative or empty base would silently disable the volume
+/// containment check downstream.
+fn config_dir_from_path(path: &std::path::Path) -> Result<std::path::PathBuf, ForgeError> {
+    let parent = match path.parent() {
+        Some(par) if !par.as_os_str().is_empty() => par.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    std::fs::canonicalize(&parent)
+        .map_err(|err| ForgeError::Config(format!("config directory {}: {err}", parent.display())))
 }
 
 /// Dispatch the `up` command.
 fn dispatch_up(cli: &Cli, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let ctx = build_context(cli, &runner, &config);
+    let ctx = build_context(cli, &runner, &config)?;
     up::run(&ctx, writer)
 }
 
@@ -120,7 +127,7 @@ fn dispatch_up(cli: &Cli, writer: &mut dyn std::io::Write) -> Result<(), ForgeEr
 fn dispatch_down(cli: &Cli, force: bool, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let ctx = build_context(cli, &runner, &config);
+    let ctx = build_context(cli, &runner, &config)?;
     down::run(&ctx, force, writer)
 }
 
@@ -128,7 +135,7 @@ fn dispatch_down(cli: &Cli, force: bool, writer: &mut dyn std::io::Write) -> Res
 fn dispatch_status(cli: &Cli, json_flag: bool, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let mut ctx = build_context(cli, &runner, &config);
+    let mut ctx = build_context(cli, &runner, &config)?;
     if json_flag {
         ctx.format = OutputFormat::Json;
     }
@@ -139,7 +146,7 @@ fn dispatch_status(cli: &Cli, json_flag: bool, writer: &mut dyn std::io::Write) 
 fn dispatch_service(cli: &Cli, sub: &ServiceCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let ctx = build_context(cli, &runner, &config);
+    let ctx = build_context(cli, &runner, &config)?;
     forge::service::dispatch(&ctx, sub, writer)
 }
 
@@ -147,7 +154,7 @@ fn dispatch_service(cli: &Cli, sub: &ServiceCommand, writer: &mut dyn std::io::W
 fn dispatch_stack(cli: &Cli, sub: &StackCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let ctx = build_context(cli, &runner, &config);
+    let ctx = build_context(cli, &runner, &config)?;
     stack::dispatch(&ctx, sub, writer)
 }
 
@@ -155,7 +162,7 @@ fn dispatch_stack(cli: &Cli, sub: &StackCommand, writer: &mut dyn std::io::Write
 fn dispatch_cluster(cli: &Cli, sub: &ClusterCommand, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
-    let ctx = build_context(cli, &runner, &config);
+    let ctx = build_context(cli, &runner, &config)?;
     cluster::dispatch(&ctx, sub, writer)
 }
 
@@ -190,5 +197,41 @@ fn report_error(err: &ForgeError, format: &OutputFormat) {
         OutputFormat::Text => {
             eprintln!("error: {err}");
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_dir_for_bare_filename_is_current_dir() {
+        let dir = config_dir_from_path(std::path::Path::new("forge.yaml")).unwrap_or_else(|_| std::process::abort());
+        let expected = std::fs::canonicalize(".").unwrap_or_else(|_| std::process::abort());
+        assert!(dir.is_absolute(), "config dir must be absolute, got: {}", dir.display());
+        assert_eq!(dir, expected, "bare filename must resolve to the current directory");
+    }
+
+    #[test]
+    fn config_dir_for_relative_path_is_canonicalized() {
+        let dir = config_dir_from_path(std::path::Path::new("./forge.yaml")).unwrap_or_else(|_| std::process::abort());
+        let expected = std::fs::canonicalize(".").unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            dir, expected,
+            "relative path must canonicalize to the current directory"
+        );
+    }
+
+    #[test]
+    fn config_dir_errors_for_missing_parent() {
+        let missing = std::path::Path::new("/nonexistent-forge-test-dir/forge.yaml");
+        let Err(err) = config_dir_from_path(missing) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config directory"),
+            "expected a config-directory error, got: {msg}"
+        );
     }
 }
