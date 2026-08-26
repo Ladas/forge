@@ -19,14 +19,31 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError`] if state loading or KIND probing fails.
+/// Returns [`ForgeError`] if state loading fails. A failed KIND probe
+/// does not abort the report; affected entries render with an unknown
+/// live status instead.
 pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let st = state::load(&ctx.state_dir)?;
-    let live = kind_ops::list_clusters(ctx.runner)?;
-    let entries = build_entries(ctx, &st, &live);
+    let live = probe_live(ctx, &st);
+    let entries = build_entries(ctx, &st, live.as_deref());
     let net_info = network_info(&st);
     let svc_entries = service_entries(ctx.runner, st.runtime.as_deref(), &st);
     render_all(writer, &entries, net_info.as_ref(), &svc_entries, &ctx.format)
+}
+
+/// Probe the live KIND cluster list, degrading gracefully.
+///
+/// The probe is skipped when neither config nor state tracks a
+/// cluster: a services-only environment must not require `kind` to be
+/// installed just to report status. A failed probe returns `None` so
+/// state phases, network info, and service entries stay visible with
+/// per-cluster live status marked unknown, rather than one failed
+/// probe suppressing the entire report.
+fn probe_live(ctx: &ForgeContext<'_>, st: &state::ForgeState) -> Option<Vec<String>> {
+    if ctx.config.spec.clusters.is_empty() && st.clusters.is_empty() {
+        return Some(Vec::new());
+    }
+    kind_ops::list_clusters(ctx.runner).ok()
 }
 
 // ---------------------------------------------------------------
@@ -41,14 +58,14 @@ struct StatusEntry {
     kind_name: String,
     /// State phase, if tracked.
     state_phase: String,
-    /// Whether a live KIND cluster was found.
-    live: bool,
+    /// Whether a live KIND cluster was found; `None` if the probe failed.
+    live: Option<bool>,
     /// Whether the current config still lists this cluster.
     in_config: bool,
 }
 
 /// Build status entries from config, state, and live clusters.
-fn build_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]) -> Vec<StatusEntry> {
+fn build_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: Option<&[String]>) -> Vec<StatusEntry> {
     let mut entries: Vec<StatusEntry> = ctx
         .config
         .spec
@@ -61,10 +78,15 @@ fn build_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]
 }
 
 /// Build a status entry for one configured cluster.
-fn entry_for_cluster(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String], name: &str) -> StatusEntry {
+fn entry_for_cluster(
+    ctx: &ForgeContext<'_>,
+    st: &state::ForgeState,
+    live: Option<&[String]>,
+    name: &str,
+) -> StatusEntry {
     let kind_name = kind_ops::kind_cluster_name(&ctx.config.spec.runtime.cluster_prefix, name);
     let state_phase = state_phase_label(st, name);
-    let is_live = live.contains(&kind_name);
+    let is_live = live.map(|list| list.contains(&kind_name));
     StatusEntry {
         name: name.to_owned(),
         kind_name,
@@ -80,7 +102,7 @@ fn entry_for_cluster(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[Str
 /// cluster removed from the config after it was created must still be
 /// visible here — hiding it would make status omit exactly the
 /// resources the user is most likely to have forgotten about.
-fn state_only_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]) -> Vec<StatusEntry> {
+fn state_only_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: Option<&[String]>) -> Vec<StatusEntry> {
     st.clusters
         .iter()
         .filter(|cluster| cluster.phase != state::ClusterPhase::Gone)
@@ -89,7 +111,7 @@ fn state_only_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[St
             name: cluster.name.clone(),
             kind_name: cluster.kind_name.clone(),
             state_phase: format!("{:?}", cluster.phase).to_lowercase(),
-            live: live.contains(&cluster.kind_name),
+            live: live.map(|list| list.contains(&cluster.kind_name)),
             in_config: false,
         })
         .collect()
@@ -263,7 +285,11 @@ fn format_svc_text(svc: &SvcEntry) -> String {
 
 /// Format one entry as a text line.
 fn format_entry_text(entry: &StatusEntry) -> String {
-    let live_label = if entry.live { "live" } else { "not found" };
+    let live_label = match entry.live {
+        Some(true) => "live",
+        Some(false) => "not found",
+        None => "live unknown",
+    };
     let config_label = if entry.in_config { "" } else { ", not in config" };
     format!(
         "  {}: state={}, kind={} ({}{})",
@@ -385,6 +411,86 @@ spec:
         let text = run_status(&ctx);
         assert!(text.contains("unknown"), "should show unknown state: {text}");
         assert!(text.contains("not found"), "should show not found: {text}");
+    }
+
+    /// Build a config with no clusters and no services.
+    fn test_config_clusterless() -> crate::config::ForgeConfig {
+        let yaml = "\
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: test
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: forge
+  clusters: []
+  services: []
+  stacks: {}
+";
+        serde_yaml::from_str(yaml).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    #[test]
+    fn status_skips_kind_probe_without_clusters() {
+        let dir = test_dir();
+        let config = test_config_clusterless();
+        // No responses registered: any kind invocation would error.
+        let runner = MockRunner::new();
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        run(&ctx, &mut buf).unwrap_or_else(|_| std::process::abort());
+
+        assert!(
+            !runner.was_called("kind get clusters"),
+            "a cluster-free environment must not require kind for status"
+        );
+    }
+
+    #[test]
+    fn status_degrades_to_unknown_when_kind_probe_fails() {
+        let dir = test_dir();
+        seed_running_hub(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kind get clusters",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "kind: connection refused\n".to_owned(),
+            },
+        );
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let text = run_status(&ctx);
+
+        assert!(text.contains("state=running"), "state phases must survive: {text}");
+        assert!(
+            text.contains("live unknown"),
+            "a failed probe must degrade to unknown, not abort: {text}"
+        );
     }
 
     /// Seed state with a running cluster the config does not list.
