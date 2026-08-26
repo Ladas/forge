@@ -36,6 +36,7 @@ pub fn validate(config: &ForgeConfig) -> Result<(), ForgeError> {
     check_coredns_requires_cross_cluster(config)?;
     check_environment_network_requires_cross_cluster(config)?;
     check_cross_cluster_provider(config)?;
+    check_certificates_not_implemented(config)?;
     check_no_templates(config)?;
     Ok(())
 }
@@ -1131,14 +1132,30 @@ fn check_cross_cluster_provider(config: &ForgeConfig) -> Result<(), ForgeError> 
     Ok(())
 }
 
+/// Certificate generation is reserved for a future phase; reject an
+/// enabled setting rather than silently ignoring it.
+///
+/// No code outside the config model reads `spec.certificates`, so a
+/// user enabling it would otherwise get a passing validation and no
+/// CA or site certificates, with nothing saying the feature is
+/// unimplemented.
+fn check_certificates_not_implemented(config: &ForgeConfig) -> Result<(), ForgeError> {
+    if config.spec.certificates.as_ref().is_some_and(|certs| certs.enabled) {
+        return Err(ForgeError::Validation(
+            "certificates.enabled: certificate generation is not implemented in this phase".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 // -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
-        ClusterSpec, EnvironmentSpec, HealthCheckType, Metadata, NetworkConfig, NodeConfig, PortMapping, RestartPolicy,
-        RuntimeConfig, StackSpec, VolumeMount,
+        CertificateConfig, ClusterSpec, EnvironmentSpec, HealthCheckType, Metadata, NetworkConfig, NodeConfig,
+        PortMapping, RestartPolicy, RuntimeConfig, StackSpec, VolumeMount,
     };
 
     /// Build a minimal valid config for test modification.
@@ -2455,6 +2472,29 @@ spec:
             cross_cluster: true,
             dns_zone: None,
         });
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
+    }
+
+    #[test]
+    fn enabled_certificates_rejected_as_unimplemented() {
+        let mut config = base_config();
+        config.spec.certificates = Some(CertificateConfig { enabled: true });
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not implemented"),
+            "expected unimplemented certificates error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn disabled_certificates_pass() {
+        let mut config = base_config();
+        config.spec.certificates = Some(CertificateConfig { enabled: false });
         validate(&config).unwrap_or_else(|_e| {
             std::process::abort();
         });
