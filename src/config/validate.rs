@@ -969,13 +969,24 @@ fn check_non_blank(value: &str, context: &str) -> Result<(), ForgeError> {
     Ok(())
 }
 
-/// Every stack referenced by a cluster must exist in `spec.stacks`.
+/// Every stack referenced by a cluster must exist in `spec.stacks`,
+/// and no cluster may reference the same stack twice.
+///
+/// A duplicate reference would apply the stack twice per `forge up`,
+/// re-running Exec and Capture steps with side effects.
 fn check_cluster_stack_refs(config: &ForgeConfig) -> Result<(), ForgeError> {
     for cluster in &config.spec.clusters {
+        let mut seen = BTreeSet::new();
         for stack_ref in &cluster.stacks {
             if !config.spec.stacks.contains_key(stack_ref) {
                 return Err(ForgeError::Validation(format!(
                     "cluster {:?} references unknown stack {:?}",
+                    cluster.name, stack_ref,
+                )));
+            }
+            if !seen.insert(stack_ref) {
+                return Err(ForgeError::Validation(format!(
+                    "cluster {:?}: stack {:?} referenced more than once",
                     cluster.name, stack_ref,
                 )));
             }
@@ -1311,6 +1322,32 @@ mod tests {
         assert!(
             msg.contains("unknown stack"),
             "expected missing stack error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cluster_referencing_stack_twice_rejected() {
+        let mut config = base_config();
+        config.spec.stacks = BTreeMap::from([(
+            "base".to_owned(),
+            StackSpec {
+                description: None,
+                steps: Vec::new(),
+            },
+        )]);
+        config.spec.clusters = vec![ClusterSpec {
+            name: "c1".to_owned(),
+            nodes: NodeConfig::default(),
+            stacks: vec!["base".to_owned(), "base".to_owned()],
+            properties: BTreeMap::new(),
+        }];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("referenced more than once"),
+            "expected duplicate stack ref error, got: {msg}"
         );
     }
 
