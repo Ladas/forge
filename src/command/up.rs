@@ -369,24 +369,43 @@ fn run_health_check(svc: &crate::config::ServiceSpec, cname: &str) -> ServiceHea
         return ServiceHealth::Unknown;
     };
     let _ = cname;
-    let Some(host_port) = health_probe_host_port(svc, check.port) else {
+    let Some((addr, host_port)) = health_probe_target(svc, check.port) else {
         return ServiceHealth::Unhealthy;
     };
-    match service::health::wait_for_healthy("127.0.0.1", host_port, check) {
+    match service::health::wait_for_healthy(&addr, host_port, check) {
         Ok(true) => ServiceHealth::Healthy,
         _ => ServiceHealth::Unhealthy,
     }
 }
 
-/// Resolve a container-side health-check port to a host-reachable port.
-fn health_probe_host_port(svc: &crate::config::ServiceSpec, container_port: u16) -> Option<u16> {
+/// Resolve a container-side health-check port to a probe target.
+///
+/// Host-network services expose the container port directly on
+/// loopback. Published ports are probed at the mapping's bind address:
+/// a mapping bound to a specific interface (e.g. a LAN IP) does not
+/// listen on 127.0.0.1, so probing loopback would mark a healthy
+/// service unhealthy.
+fn health_probe_target(svc: &crate::config::ServiceSpec, container_port: u16) -> Option<(String, u16)> {
     if matches!(svc.network, crate::config::NetworkMode::Host) {
-        return Some(container_port);
+        return Some(("127.0.0.1".to_owned(), container_port));
     }
     svc.ports
         .iter()
         .find(|port| port.container == container_port && port.protocol == "tcp")
-        .map(|port| port.host)
+        .map(|port| (probe_addr(port.bind_address.as_deref()), port.host))
+}
+
+/// Choose the probe address for a port mapping's bind address.
+///
+/// An unset or unspecified (`0.0.0.0`/`::`) address publishes on all
+/// interfaces, which loopback reaches; any other address is bound to
+/// that interface only and must be probed there.
+fn probe_addr(bind_address: Option<&str>) -> String {
+    match bind_address {
+        None | Some("0.0.0.0") => "127.0.0.1".to_owned(),
+        Some("::") => "::1".to_owned(),
+        Some(addr) => addr.to_owned(),
+    }
 }
 
 /// Insert or update a service state entry.
@@ -976,28 +995,35 @@ spec:
         assert_eq!(cluster.phase, ClusterPhase::Running, "phase must be updated");
     }
 
-    #[test]
-    fn health_probe_maps_container_port_to_host_port() {
-        let yaml = "
+    /// Parse a config with one service using the given port mapping.
+    fn config_with_port_mapping(mapping: &str) -> crate::config::ForgeConfig {
+        let yaml = format!(
+            "
 apiVersion: forge.praxis.dev/v1alpha1
 kind: Environment
-metadata: { name: test }
+metadata: {{ name: test }}
 spec:
-  runtime: { provider: docker, clusterPrefix: forge }
+  runtime: {{ provider: docker, clusterPrefix: forge }}
   services:
     - name: web
       image: example/web:v1
       ports:
-        - { bindAddress: 127.0.0.1, host: 8080, container: 80, protocol: tcp }
-  stacks: {}
-";
-        let config: crate::config::ForgeConfig = serde_yaml::from_str(yaml).unwrap_or_else(|_| {
+        - {mapping}
+  stacks: {{}}
+"
+        );
+        serde_yaml::from_str(&yaml).unwrap_or_else(|_| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
             {
                 unreachable!()
             }
-        });
+        })
+    }
+
+    /// Resolve the probe target for the config's single service.
+    fn probe_target_for(mapping: &str, container_port: u16) -> Option<(String, u16)> {
+        let config = config_with_port_mapping(mapping);
         let svc = config.spec.services.first().unwrap_or_else(|| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
@@ -1005,7 +1031,37 @@ spec:
                 unreachable!()
             }
         });
-        assert_eq!(health_probe_host_port(svc, 80), Some(8080));
+        health_probe_target(svc, container_port)
+    }
+
+    #[test]
+    fn health_probe_maps_container_port_to_host_port() {
+        let target = probe_target_for(
+            "{ bindAddress: 127.0.0.1, host: 8080, container: 80, protocol: tcp }",
+            80,
+        );
+        assert_eq!(target, Some(("127.0.0.1".to_owned(), 8080)));
+    }
+
+    #[test]
+    fn health_probe_uses_the_mapping_bind_address() {
+        // A port published on a specific interface is not reachable on
+        // loopback, so the probe must target that interface.
+        let target = probe_target_for(
+            "{ bindAddress: 192.168.1.50, host: 8080, container: 80, protocol: tcp }",
+            80,
+        );
+        assert_eq!(target, Some(("192.168.1.50".to_owned(), 8080)));
+    }
+
+    #[test]
+    fn health_probe_treats_unspecified_bind_addresses_as_loopback() {
+        let all_v4 = probe_target_for("{ bindAddress: 0.0.0.0, host: 8080, container: 80, protocol: tcp }", 80);
+        assert_eq!(all_v4, Some(("127.0.0.1".to_owned(), 8080)));
+        let all_v6 = probe_target_for("{ bindAddress: '::', host: 8080, container: 80, protocol: tcp }", 80);
+        assert_eq!(all_v6, Some(("::1".to_owned(), 8080)));
+        let unset = probe_target_for("{ host: 8080, container: 80, protocol: tcp }", 80);
+        assert_eq!(unset, Some(("127.0.0.1".to_owned(), 8080)));
     }
 
     /// Build a config with `network.crossCluster: true`.
