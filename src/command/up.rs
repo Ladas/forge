@@ -322,11 +322,30 @@ fn start_one_svc(
     service::start_service(ctx.runner, &params, svc)?;
     let health = run_health_check(svc, &cname);
     upsert_svc_state(state, svc, &cname, &health);
+    ensure_healthy(svc, &cname, &health)?;
     Ok(ServiceResult {
         name: svc.name.clone(),
         container_name: cname,
         dry_run: false,
     })
+}
+
+/// Fail the run when a configured health check never passed.
+///
+/// The unhealthy phase is recorded in state before this runs, and the
+/// checkpointed service phase persists it. Failing loudly keeps
+/// `forge up` honest for scripts: without it a dead service printed a
+/// plain "started" line and the run exited 0, with `forge status` as
+/// the only signal.
+fn ensure_healthy(svc: &crate::config::ServiceSpec, cname: &str, health: &ServiceHealth) -> Result<(), ForgeError> {
+    if *health != ServiceHealth::Unhealthy {
+        return Ok(());
+    }
+    let retries = svc.health_check.as_ref().map_or(0, |check| check.retries);
+    Err(ForgeError::Runtime(format!(
+        "service '{}' (container: {cname}) failed its health check after {retries} retries",
+        svc.name
+    )))
 }
 
 /// Build service parameters from context.
@@ -806,6 +825,95 @@ spec:
         assert!(
             dir.path().join("runtime/kubeconfig/hub/config").exists(),
             "rewritten kubeconfig should be written under runtime"
+        );
+    }
+
+    /// Find a TCP port with no listener on loopback.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| std::process::abort());
+        let Ok(addr) = listener.local_addr() else {
+            std::process::abort();
+        };
+        drop(listener);
+        addr.port()
+    }
+
+    /// YAML for one auto-start service probing the given host port.
+    fn health_check_yaml(port: u16) -> String {
+        format!(
+            "\
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: test
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: forge
+  clusters: []
+  services:
+    - name: web
+      image: example/web:v1
+      ports:
+        - host: {port}
+          container: 80
+          protocol: tcp
+      healthCheck:
+        type: tcp
+        port: 80
+        interval: 1ms
+        timeout: 50ms
+        retries: 1
+  stacks: {{}}
+"
+        )
+    }
+
+    /// Config with one auto-start service probing the given host port.
+    fn test_config_with_health_check(port: u16) -> crate::config::ForgeConfig {
+        serde_yaml::from_str(&health_check_yaml(port)).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    #[test]
+    fn up_fails_when_service_health_check_never_passes() {
+        let dir = test_dir();
+        // Nothing listens on the probed port, so every retry fails.
+        let config = test_config_with_health_check(closed_port());
+        let mut runner = MockRunner::new();
+        runner.respond("docker version", docker_ok());
+        runner.respond("docker container inspect test-web", docker_not_found());
+        runner.respond("docker", empty_ok());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, &mut buf);
+
+        let Err(err) = result else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("service 'web'") && msg.contains("failed its health check"),
+            "the error must name the unhealthy service: {msg}"
+        );
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_service(&st, "web").map(|svc| svc.phase.clone()),
+            Some(ServicePhase::Unhealthy),
+            "the failed probe must still be recorded in state"
         );
     }
 
