@@ -61,14 +61,27 @@ fn bounded(value: Duration, raw: &str) -> Result<Duration, ForgeError> {
 
 /// Attempt a single TCP connection to `addr:port` with a timeout.
 ///
-/// Returns `true` if the connection succeeds, `false` otherwise.
+/// `addr` may be an IPv4 literal, a bare IPv6 literal (no brackets
+/// needed), or a hostname.  Resolution goes through
+/// [`std::net::ToSocketAddrs`] on the `(addr, port)` pair — never a
+/// hand-formatted `"{addr}:{port}"` string, whose parse would silently
+/// reject hostnames and unbracketed IPv6 and look exactly like a
+/// closed port.  Every resolved candidate is tried until one connects.
+///
+/// Returns `true` if a connection succeeds, `false` if none does or
+/// the address does not resolve.
 pub fn tcp_probe(addr: &str, port: u16, timeout: Duration) -> bool {
-    let target = format!("{addr}:{port}");
-    let socket_addr: std::net::SocketAddr = match target.parse() {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
+    use std::net::ToSocketAddrs as _;
+
+    let Ok(candidates) = (addr, port).to_socket_addrs() else {
+        return false;
     };
-    std::net::TcpStream::connect_timeout(&socket_addr, timeout).is_ok()
+    for socket_addr in candidates {
+        if std::net::TcpStream::connect_timeout(&socket_addr, timeout).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 // -------------------------------------------------------------
@@ -165,6 +178,31 @@ mod tests {
     fn tcp_probe_unreachable() {
         let result = tcp_probe("127.0.0.1", 59_999, Duration::from_millis(50));
         assert!(!result, "probe should fail on unreachable port");
+    }
+
+    #[test]
+    fn tcp_probe_resolves_hostnames() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| std::process::abort());
+        let port = listener.local_addr().unwrap_or_else(|_| std::process::abort()).port();
+        let result = tcp_probe("localhost", port, Duration::from_millis(500));
+        assert!(result, "a hostname must resolve and connect, not read as closed");
+    }
+
+    #[test]
+    fn tcp_probe_accepts_bare_ipv6_literals() {
+        // Bind on the IPv6 loopback if the host supports it; skip otherwise.
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            return;
+        };
+        let port = listener.local_addr().unwrap_or_else(|_| std::process::abort()).port();
+        let result = tcp_probe("::1", port, Duration::from_millis(500));
+        assert!(result, "an unbracketed IPv6 literal must probe, not read as closed");
+    }
+
+    #[test]
+    fn tcp_probe_unresolvable_host_is_false() {
+        let result = tcp_probe("host.invalid", 59_999, Duration::from_millis(50));
+        assert!(!result, "an unresolvable host cannot be healthy");
     }
 
     #[test]
