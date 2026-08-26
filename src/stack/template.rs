@@ -30,6 +30,12 @@ pub struct TemplateContext {
     pub network: Option<NetworkTemplateVars>,
     /// Captured values from stack steps (resolves `captures.CLUSTER.KEY`).
     pub captures: BTreeMap<String, BTreeMap<String, String>>,
+    /// Plan mode: render values that `apply` produces at run time as
+    /// `<pending-...>` placeholders instead of failing. Captures made
+    /// during this run and an unallocated `MetalLB` pool do not exist at
+    /// plan time; genuinely invalid references still error. `apply`
+    /// leaves this `false`.
+    pub plan_mode: bool,
 }
 
 /// Network-related template variables.
@@ -190,15 +196,33 @@ fn resolve_network(parts: &[&str], ctx: &TemplateContext) -> Result<String, Forg
     let field = parts.get(1).copied().unwrap_or_default();
     match field {
         "dnsZone" => Ok(vars.dns_zone.clone()),
-        "pool" => vars
-            .pool
-            .clone()
-            .ok_or_else(|| ForgeError::Config("no MetalLB pool allocated for this cluster".to_owned())),
+        "pool" => resolve_pool(vars.pool.as_deref(), ctx.plan_mode),
         _ => Err(ForgeError::Config(format!("unknown network field '{field}'"))),
     }
 }
 
+/// Resolve `network.pool`, or a plan-mode placeholder when unallocated.
+///
+/// Apply computes the pool live from the container network; plan does not run
+/// the runtime, so before allocation the pool renders as a placeholder rather
+/// than failing.
+fn resolve_pool(pool: Option<&str>, plan_mode: bool) -> Result<String, ForgeError> {
+    if let Some(range) = pool {
+        return Ok(range.to_owned());
+    }
+    if plan_mode {
+        return Ok("<pending-pool>".to_owned());
+    }
+    Err(ForgeError::Config(
+        "no MetalLB pool allocated for this cluster".to_owned(),
+    ))
+}
+
 /// Resolve `captures.CLUSTER.KEY`.
+///
+/// In plan mode an unresolved capture yields a `<pending-capture:CLUSTER.KEY>`
+/// placeholder instead of an error, because the value is produced during
+/// `apply`, not `plan`. Malformed `captures` syntax still errors either way.
 fn resolve_captures(parts: &[&str], ctx: &TemplateContext) -> Result<String, ForgeError> {
     let cluster = parts.get(1).copied().unwrap_or_default();
     let key = parts.get(2).copied().unwrap_or_default();
@@ -207,14 +231,24 @@ fn resolve_captures(parts: &[&str], ctx: &TemplateContext) -> Result<String, For
             "captures requires captures.CLUSTER.KEY syntax".to_owned(),
         ));
     }
-    let cluster_caps = ctx
-        .captures
-        .get(cluster)
-        .ok_or_else(|| ForgeError::Config(format!("no captures found for cluster '{cluster}'")))?;
-    cluster_caps
-        .get(key)
-        .cloned()
-        .ok_or_else(|| ForgeError::Config(format!("capture key '{key}' not found for cluster '{cluster}'")))
+    match ctx.captures.get(cluster).and_then(|caps| caps.get(key)) {
+        Some(value) => Ok(value.clone()),
+        None if ctx.plan_mode => Ok(format!("<pending-capture:{cluster}.{key}>")),
+        None => Err(unresolved_capture_error(&ctx.captures, cluster, key)),
+    }
+}
+
+/// Build the strict-mode error for an unresolved capture, keeping the
+/// missing-cluster and missing-key messages distinct as before.
+fn unresolved_capture_error(
+    captures: &BTreeMap<String, BTreeMap<String, String>>,
+    cluster: &str,
+    key: &str,
+) -> ForgeError {
+    if captures.contains_key(cluster) {
+        return ForgeError::Config(format!("capture key '{key}' not found for cluster '{cluster}'"));
+    }
+    ForgeError::Config(format!("no captures found for cluster '{cluster}'"))
 }
 
 /// Walk into a JSON value following dot-separated path segments.
@@ -271,6 +305,7 @@ mod tests {
             item: None,
             network: None,
             captures: BTreeMap::new(),
+            plan_mode: false,
         }
     }
 

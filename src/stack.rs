@@ -54,6 +54,13 @@ fn handle_list(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), For
 }
 
 /// Show what a stack apply would do.
+///
+/// Plan expands for-each steps and renders templates with the same context
+/// `apply` builds, so it surfaces resolved URLs and values and catches
+/// variable, property, and path errors up front. Values produced during a
+/// run (this run's captures, an unallocated `MetalLB` pool) do not exist yet,
+/// so references to them render as `<pending-...>` placeholders (see
+/// `engine::plan_stack`).
 fn handle_plan(
     ctx: &ForgeContext<'_>,
     cluster_name: &str,
@@ -62,9 +69,11 @@ fn handle_plan(
 ) -> Result<(), ForgeError> {
     let cluster = lookup_cluster(ctx, cluster_name)?;
     let stacks = resolve_stacks(ctx, cluster, stack_filter)?;
+    let st = state::load(&ctx.state_dir)?;
+    let planned = plan_stacks(ctx, cluster, &stacks, &st)?;
     match &ctx.format {
-        OutputFormat::Json => render_plan_json(cluster, &stacks, writer),
-        OutputFormat::Text => render_plan_text(cluster, &stacks, writer),
+        OutputFormat::Json => render_plan_json(cluster, &planned, writer),
+        OutputFormat::Text => render_plan_text(cluster, &planned, writer),
     }
 }
 
@@ -445,16 +454,41 @@ fn render_list_text(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<()
 // Plan rendering
 // -------------------------------------------------------------
 
+/// A stack expanded and rendered for planning.
+struct PlannedStack<'plan> {
+    /// Stack name.
+    name: &'plan str,
+    /// Rendered, for-each-expanded steps in execution order.
+    steps: Vec<engine::PlannedStep>,
+}
+
+/// Expand and render each resolved stack against the same context apply uses.
+///
+/// State is read so cross-cluster captures and any recorded `MetalLB` pool
+/// resolve; values apply computes live during this run render as placeholders.
+fn plan_stacks<'plan>(
+    ctx: &ForgeContext<'_>,
+    cluster: &ClusterSpec,
+    stacks: &[(&'plan str, &StackSpec)],
+    st: &state::ForgeState,
+) -> Result<Vec<PlannedStack<'plan>>, ForgeError> {
+    let network = build_network_params(ctx, cluster, st);
+    stacks
+        .iter()
+        .map(|&(name, spec)| {
+            let steps = engine::plan_stack(cluster, name, spec, network.as_ref(), &st.captures)?;
+            Ok(PlannedStack { name, steps })
+        })
+        .collect()
+}
+
 /// Render plan as JSON.
 fn render_plan_json(
     cluster: &ClusterSpec,
-    stacks: &[(&str, &StackSpec)],
+    planned: &[PlannedStack<'_>],
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
-    let entries: Vec<serde_json::Value> = stacks
-        .iter()
-        .map(|(name, spec)| plan_entry(&cluster.name, name, spec))
-        .collect();
+    let entries: Vec<serde_json::Value> = planned.iter().map(|stack| plan_entry(&cluster.name, stack)).collect();
     let data = serde_json::json!({ "cluster": cluster.name, "stacks": entries });
     let result = output::success(data);
     output::write_json(writer, &result)?;
@@ -462,49 +496,56 @@ fn render_plan_json(
 }
 
 /// Build a JSON entry for one planned stack.
-fn plan_entry(cluster: &str, name: &str, spec: &StackSpec) -> serde_json::Value {
-    let steps: Vec<serde_json::Value> = spec.steps.iter().map(step_plan_entry).collect();
+fn plan_entry(cluster: &str, stack: &PlannedStack<'_>) -> serde_json::Value {
+    let steps: Vec<serde_json::Value> = stack.steps.iter().map(planned_step_entry).collect();
     serde_json::json!({
         "cluster": cluster,
-        "stack": name,
+        "stack": stack.name,
         "steps": steps,
     })
 }
 
 /// Build a JSON entry for one planned step.
-fn step_plan_entry(step: &crate::config::StepSpec) -> serde_json::Value {
+fn planned_step_entry(planned: &engine::PlannedStep) -> serde_json::Value {
     serde_json::json!({
-        "type": step_type_label(step),
-        "description": step_description(step),
-        "warning": step_warning(step),
+        "type": step_type_label(&planned.step),
+        "description": step_description(&planned.step),
+        "warning": step_warning(&planned.step),
+        "item": planned.item,
     })
 }
 
 /// Render plan as text.
 fn render_plan_text(
     cluster: &ClusterSpec,
-    stacks: &[(&str, &StackSpec)],
+    planned: &[PlannedStack<'_>],
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
-    for (name, spec) in stacks {
-        output::write_text(writer, &format!("Stack: {name} -> {}", cluster.name))?;
-        render_plan_steps(&spec.steps, writer)?;
+    for stack in planned {
+        output::write_text(writer, &format!("Stack: {} -> {}", stack.name, cluster.name))?;
+        render_planned_steps(&stack.steps, writer)?;
     }
     Ok(())
 }
 
-/// Render step list for plan text output.
-fn render_plan_steps(steps_list: &[crate::config::StepSpec], writer: &mut dyn Write) -> Result<(), ForgeError> {
-    for (idx, step) in steps_list.iter().enumerate() {
+/// Render the expanded step list for plan text output.
+fn render_planned_steps(steps_list: &[engine::PlannedStep], writer: &mut dyn Write) -> Result<(), ForgeError> {
+    for (idx, planned) in steps_list.iter().enumerate() {
         let idx = idx.saturating_add(1);
-        let label = step_type_label(step);
-        let desc = step_description(step);
-        output::write_text(writer, &format!("  {idx}. [{label}] {desc}"))?;
-        if let Some(warning) = step_warning(step) {
+        let label = step_type_label(&planned.step);
+        let desc = step_description(&planned.step);
+        let item = plan_item_suffix(planned.item.as_ref());
+        output::write_text(writer, &format!("  {idx}. [{label}] {desc}{item}"))?;
+        if let Some(warning) = step_warning(&planned.step) {
             output::write_text(writer, &format!("     WARNING: {warning}"))?;
         }
     }
     Ok(())
+}
+
+/// Format the for-each item annotation for a planned step, if any.
+fn plan_item_suffix(item: Option<&serde_json::Value>) -> String {
+    item.map_or_else(String::new, |val| format!(" (item {val})"))
 }
 
 // -------------------------------------------------------------
@@ -1054,5 +1095,117 @@ mod tests {
         assert_eq!(network.cluster_pools.len(), 1);
         let pool = network.cluster_pools.first().unwrap_or_else(|| std::process::abort());
         assert_eq!(pool.range, allocation.range);
+    }
+
+    /// Build a single-stack hub config whose base stack runs the given steps.
+    fn plan_config_with_steps(steps: Vec<StepSpec>) -> ForgeConfig {
+        let mut config = test_config();
+        config.spec.stacks = BTreeMap::from([(
+            "base".to_owned(),
+            StackSpec {
+                description: None,
+                steps,
+            },
+        )]);
+        config
+    }
+
+    /// Run the plan handler for the hub cluster over a fresh state dir.
+    fn plan_hub(config: &ForgeConfig, format: OutputFormat) -> (Result<(), ForgeError>, Vec<u8>) {
+        let runner = crate::command::runner::MockRunner::new();
+        let state_dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let ctx = ForgeContext {
+            runner: &runner,
+            config,
+            state_dir: state_dir.path().to_path_buf(),
+            config_dir: std::path::PathBuf::from("/tmp"),
+            format,
+            dry_run: false,
+        };
+        let mut buf = Vec::new();
+        let result = handle_plan(&ctx, "hub", None, &mut buf);
+        (result, buf)
+    }
+
+    #[test]
+    fn plan_expands_foreach_and_renders_templates() {
+        let mut config = plan_config_with_steps(vec![StepSpec::ForEach {
+            property: "workers".to_owned(),
+            steps: vec![StepSpec::Manifest {
+                path: "{{ item }}.yaml".to_owned(),
+            }],
+        }]);
+        if let Some(cluster) = config.spec.clusters.first_mut() {
+            cluster
+                .properties
+                .insert("workers".to_owned(), serde_json::json!(["w1", "w2"]));
+        }
+        let (result, buf) = plan_hub(&config, OutputFormat::Text);
+        result.unwrap_or_else(|_| std::process::abort());
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.contains("apply w1.yaml"), "should render w1: {text}");
+        assert!(text.contains("apply w2.yaml"), "should render w2: {text}");
+        assert!(!text.contains("for-each"), "for-each must be expanded: {text}");
+    }
+
+    #[test]
+    fn plan_marks_unresolved_capture_without_failing() {
+        let config = plan_config_with_steps(vec![StepSpec::Manifest {
+            path: "{{ cluster.name }}-{{ captures.provider.ip }}.yaml".to_owned(),
+        }]);
+        let (result, buf) = plan_hub(&config, OutputFormat::Text);
+        result.unwrap_or_else(|_| std::process::abort());
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("hub-<pending-capture:provider.ip>.yaml"),
+            "placeholder: {text}"
+        );
+    }
+
+    #[test]
+    fn plan_surfaces_unknown_property_reference() {
+        let config = plan_config_with_steps(vec![StepSpec::Manifest {
+            path: "{{ cluster.properties.missing }}.yaml".to_owned(),
+        }]);
+        let (result, _buf) = plan_hub(&config, OutputFormat::Text);
+        assert!(result.is_err(), "unknown property must surface as a plan error");
+    }
+
+    #[test]
+    fn plan_surfaces_rendered_path_escape() {
+        let mut config = plan_config_with_steps(vec![StepSpec::Manifest {
+            path: "{{ cluster.properties.path }}".to_owned(),
+        }]);
+        if let Some(cluster) = config.spec.clusters.first_mut() {
+            cluster
+                .properties
+                .insert("path".to_owned(), serde_json::json!("../escape.yaml"));
+        }
+        let (result, _buf) = plan_hub(&config, OutputFormat::Text);
+        assert!(result.is_err(), "rendered path escape must surface as a plan error");
+    }
+
+    #[test]
+    fn plan_json_renders_expanded_steps() {
+        let mut config = plan_config_with_steps(vec![StepSpec::ForEach {
+            property: "workers".to_owned(),
+            steps: vec![StepSpec::Manifest {
+                path: "{{ item }}.yaml".to_owned(),
+            }],
+        }]);
+        if let Some(cluster) = config.spec.clusters.first_mut() {
+            cluster
+                .properties
+                .insert("workers".to_owned(), serde_json::json!(["w1"]));
+        }
+        let (result, buf) = plan_hub(&config, OutputFormat::Json);
+        result.unwrap_or_else(|_| std::process::abort());
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap_or_else(|_| std::process::abort());
+        let desc = parsed
+            .pointer("/data/stacks/0/steps/0/description")
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(desc, Some("apply w1.yaml"), "JSON plan must render the expanded step");
+        let item = parsed.pointer("/data/stacks/0/steps/0/item");
+        assert_eq!(item, Some(&serde_json::json!("w1")), "JSON plan must record the item");
     }
 }

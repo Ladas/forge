@@ -55,6 +55,16 @@ pub struct PoolAllocation {
     pub range: String,
 }
 
+/// One fully-expanded, template-rendered step produced by planning.
+pub struct PlannedStep {
+    /// Rendered step; template expressions are resolved and unresolved
+    /// captures appear as `<pending-capture:CLUSTER.KEY>` placeholders.
+    pub step: StepSpec,
+    /// The for-each element in effect when this step was expanded, or
+    /// `None` for a top-level step.
+    pub item: Option<serde_json::Value>,
+}
+
 /// Network parameters passed to the engine by the caller.
 pub struct NetworkParams<'env> {
     /// Pre-allocated pool range from state, if any.
@@ -132,6 +142,35 @@ pub fn apply_stack(
     })
 }
 
+/// Expand and render a stack for `plan` without executing anything.
+///
+/// Uses the same `build_template_context` as `apply_stack`, so plan reflects
+/// exactly what apply will render, and expands for-each steps into their
+/// per-item rendered steps. Rendering runs in plan mode: captures produced
+/// during this run and an unallocated `MetalLB` pool render as `<pending-...>`
+/// placeholders instead of failing. Genuinely invalid references (unknown
+/// property, `..` path escape) still error. This function does not touch the
+/// runner: plan stays offline.
+///
+/// # Errors
+///
+/// Returns [`ForgeError`] if a template references an unknown variable or
+/// property, or a rendered path escapes the config root.
+pub fn plan_stack(
+    cluster: &ClusterSpec,
+    stack_name: &str,
+    stack: &StackSpec,
+    network: Option<&NetworkParams<'_>>,
+    captures: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<Vec<PlannedStep>, ForgeError> {
+    let pool = network.and_then(|net| net.cluster_pool.map(ToOwned::to_owned));
+    let mut tpl = build_template_context(cluster, stack_name, network, pool.as_deref(), captures);
+    tpl.plan_mode = true;
+    let mut planned = Vec::new();
+    plan_steps(&stack.steps, &tpl, &mut planned)?;
+    Ok(planned)
+}
+
 // -------------------------------------------------------------
 // Context builders
 // -------------------------------------------------------------
@@ -154,6 +193,7 @@ fn build_template_context(
             pool: pool.map(ToOwned::to_owned),
         }),
         captures: captures.clone(),
+        plan_mode: false,
     }
 }
 
@@ -597,12 +637,7 @@ fn execute_foreach(
     sc: &mut StepContext,
 ) -> Result<usize, ForgeError> {
     let arr = lookup_property_array(property, tpl)?;
-    if arr.len() > MAX_FOREACH_ITEMS {
-        return Err(ForgeError::Config(format!(
-            "for-each property '{property}' has {} items; maximum is {MAX_FOREACH_ITEMS}",
-            arr.len()
-        )));
-    }
+    check_foreach_len(property, arr.len())?;
     let mut total: usize = 0;
     for element in &arr {
         let mut child_tpl = tpl.clone();
@@ -610,6 +645,16 @@ fn execute_foreach(
         total = total.saturating_add(execute_steps(runner, sub_steps, &mut child_tpl, sc)?);
     }
     Ok(total)
+}
+
+/// Reject a for-each whose expanded array exceeds [`MAX_FOREACH_ITEMS`].
+fn check_foreach_len(property: &str, len: usize) -> Result<(), ForgeError> {
+    if len > MAX_FOREACH_ITEMS {
+        return Err(ForgeError::Config(format!(
+            "for-each property '{property}' has {len} items; maximum is {MAX_FOREACH_ITEMS}"
+        )));
+    }
+    Ok(())
 }
 
 /// Look up a cluster property and require it to be an array.
@@ -969,6 +1014,72 @@ fn render_vec(items: &[String], tpl: &TemplateContext) -> Result<Vec<String>, Fo
 }
 
 // -------------------------------------------------------------
+// Plan expansion
+// -------------------------------------------------------------
+
+/// Render and for-each-expand a list of steps for planning.
+fn plan_steps(steps: &[StepSpec], tpl: &TemplateContext, out: &mut Vec<PlannedStep>) -> Result<(), ForgeError> {
+    for step in steps {
+        let rendered = render_step(step, tpl)?;
+        plan_step(&rendered, tpl, out)?;
+    }
+    Ok(())
+}
+
+/// Add one rendered step to the plan, expanding for-each in place.
+fn plan_step(rendered: &StepSpec, tpl: &TemplateContext, out: &mut Vec<PlannedStep>) -> Result<(), ForgeError> {
+    if let StepSpec::ForEach { property, steps: sub } = rendered {
+        return plan_foreach(property, sub, tpl, out);
+    }
+    validate_planned_paths(rendered)?;
+    out.push(PlannedStep {
+        step: rendered.clone(),
+        item: tpl.item.clone(),
+    });
+    Ok(())
+}
+
+/// Expand a for-each step over its property array for planning.
+fn plan_foreach(
+    property: &str,
+    sub_steps: &[StepSpec],
+    tpl: &TemplateContext,
+    out: &mut Vec<PlannedStep>,
+) -> Result<(), ForgeError> {
+    let arr = lookup_property_array(property, tpl)?;
+    check_foreach_len(property, arr.len())?;
+    for element in &arr {
+        let mut child_tpl = tpl.clone();
+        child_tpl.item = Some(element.clone());
+        plan_steps(sub_steps, &child_tpl, out)?;
+    }
+    Ok(())
+}
+
+/// Validate rendered path fields exactly as the executor does before running.
+fn validate_planned_paths(step: &StepSpec) -> Result<(), ForgeError> {
+    match step {
+        StepSpec::Manifest { path } | StepSpec::Kustomize { path } | StepSpec::TemplateManifest { path } => {
+            check_relative_path(path, "stack path")
+        },
+        StepSpec::TemplateFile { source, target } => {
+            check_relative_path(source, "stack path")?;
+            check_relative_path(target, "stack output path")
+        },
+        StepSpec::Url { .. }
+        | StepSpec::Helm { .. }
+        | StepSpec::Deployment { .. }
+        | StepSpec::Service { .. }
+        | StepSpec::Wait { .. }
+        | StepSpec::Exec { .. }
+        | StepSpec::ForEach { .. }
+        | StepSpec::MetallbAutoPool { .. }
+        | StepSpec::CoreDnsForward { .. }
+        | StepSpec::Capture { .. } => Ok(()),
+    }
+}
+
+// -------------------------------------------------------------
 // SHA-256 verification
 // -------------------------------------------------------------
 
@@ -1007,13 +1118,22 @@ fn check_remote_manifest_size(len: usize) -> Result<(), ForgeError> {
 // Path resolution
 // -------------------------------------------------------------
 
-/// Resolve a relative path against the config directory after template rendering.
-fn resolve_path(config_dir: &Path, path: &str) -> Result<String, ForgeError> {
+/// Reject an empty, absolute, or `..`-escaping stack path.
+///
+/// Shared by [`resolve_path`], [`resolve_output_path`], and plan-time
+/// validation so plan rejects the same rendered escapes apply does.
+fn check_relative_path(path: &str, label: &str) -> Result<(), ForgeError> {
     if path.trim().is_empty() || Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
         return Err(ForgeError::Config(format!(
-            "stack path '{path}' must be relative and must not escape the config root"
+            "{label} '{path}' must be relative and must not escape the config root"
         )));
     }
+    Ok(())
+}
+
+/// Resolve a relative path against the config directory after template rendering.
+fn resolve_path(config_dir: &Path, path: &str) -> Result<String, ForgeError> {
+    check_relative_path(path, "stack path")?;
     Ok(config_dir.join(path).to_string_lossy().into_owned())
 }
 
@@ -1026,11 +1146,7 @@ const STATE_DIR_PREFIX: &str = ".forge/";
 /// resolve under the configured Forge state directory so stack steps can
 /// prepare runtime files for host services.
 fn resolve_output_path(config_dir: &Path, state_dir: &Path, path: &str) -> Result<std::path::PathBuf, ForgeError> {
-    if path.trim().is_empty() || Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
-        return Err(ForgeError::Config(format!(
-            "stack output path '{path}' must be relative and must not escape the config root"
-        )));
-    }
+    check_relative_path(path, "stack output path")?;
     if let Some(suffix) = path.strip_prefix(STATE_DIR_PREFIX) {
         return Ok(state_dir.join(suffix));
     }
@@ -1079,6 +1195,7 @@ mod tests {
             item: None,
             network: None,
             captures: BTreeMap::new(),
+            plan_mode: false,
         }
     }
 
@@ -1265,6 +1382,7 @@ mod tests {
             item: None,
             network: None,
             captures: BTreeMap::new(),
+            plan_mode: false,
         };
         let steps = vec![StepSpec::Manifest {
             path: "{{ cluster.properties.path }}".to_owned(),
@@ -1392,14 +1510,7 @@ mod tests {
 
     #[test]
     fn render_step_templates_strings() {
-        let tpl = TemplateContext {
-            cluster_name: "hub".to_owned(),
-            stack_name: "base".to_owned(),
-            properties: BTreeMap::new(),
-            item: None,
-            network: None,
-            captures: BTreeMap::new(),
-        };
+        let tpl = make_template_context();
         let step = StepSpec::Manifest {
             path: "{{ cluster.name }}/manifests".to_owned(),
         };
