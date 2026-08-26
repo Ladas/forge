@@ -116,6 +116,11 @@ struct ApplyResult {
 }
 
 /// Apply resolved stacks and persist state.
+///
+/// Stops after the first failed stack: later stacks can consume
+/// captures recorded by earlier ones, so they are not applied on top
+/// of an incomplete prerequisite.  State for the stacks already
+/// attempted is still persisted.
 fn apply_stacks(
     ctx: &ForgeContext<'_>,
     cluster: &ClusterSpec,
@@ -126,7 +131,11 @@ fn apply_stacks(
     let mut results = Vec::new();
     for (name, spec) in stacks {
         let result = apply_one(ctx, cluster, name, spec, &mut st);
+        let failed = !result.success;
         results.push(result);
+        if failed {
+            break;
+        }
     }
     state::save(&ctx.state_dir, &st)?;
     Ok(results)
@@ -699,6 +708,74 @@ mod tests {
         assert!(text.contains("Stack: base -> hub"), "should show stack target: {text}");
         assert!(text.contains("[manifest]"), "should describe manifest step: {text}");
         assert!(text.contains("[wait]"), "should describe wait step: {text}");
+    }
+
+    /// Build a one-step manifest stack for apply-order tests.
+    fn manifest_stack(path: &str) -> StackSpec {
+        StackSpec {
+            description: None,
+            steps: vec![StepSpec::Manifest { path: path.to_owned() }],
+        }
+    }
+
+    /// Build a config whose cluster references two stacks in order.
+    fn two_stack_config() -> ForgeConfig {
+        let mut config = test_config();
+        config.spec.stacks = BTreeMap::from([
+            ("a-first".to_owned(), manifest_stack("a.yaml")),
+            ("b-second".to_owned(), manifest_stack("b.yaml")),
+        ]);
+        if let Some(cluster) = config.spec.clusters.first_mut() {
+            cluster.stacks = vec!["a-first".to_owned(), "b-second".to_owned()];
+        }
+        config
+    }
+
+    /// Build a runner whose docker probe succeeds and kubectl fails.
+    fn failing_kubectl_runner() -> crate::command::runner::MockRunner {
+        let mut runner = crate::command::runner::MockRunner::new();
+        runner.respond(
+            "docker",
+            crate::command::runner::CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        runner.respond(
+            "kubectl",
+            crate::command::runner::CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "apply failed".to_owned(),
+            },
+        );
+        runner
+    }
+
+    #[test]
+    fn apply_stacks_stops_after_first_failed_stack() {
+        let config = two_stack_config();
+        let state_dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let runner = failing_kubectl_runner();
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: state_dir.path().to_path_buf(),
+            config_dir: std::path::PathBuf::from("/tmp"),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+        let cluster = config.spec.clusters.first().unwrap_or_else(|| std::process::abort());
+        let stacks = resolve_stacks(&ctx, cluster, None).unwrap_or_else(|_| std::process::abort());
+        let results = apply_stacks(&ctx, cluster, &stacks).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(results.len(), 1, "must stop after the failed stack");
+        assert!(!runner.was_called("b.yaml"), "later stack must not be applied");
+        let st = state::load(&ctx.state_dir).unwrap_or_else(|_| std::process::abort());
+        assert!(
+            state::find_stack(&st, "b-second", "hub").is_none(),
+            "unattempted stack must not gain state"
+        );
     }
 
     #[test]
