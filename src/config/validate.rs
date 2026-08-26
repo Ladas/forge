@@ -700,21 +700,18 @@ fn check_upstream_port(port_str: &str, ctx: &str) -> Result<(), ForgeError> {
 }
 
 /// Validate the host portion as IPv4 or DNS hostname.
+///
+/// IPv4 parsing is attempted first; anything else is validated as a
+/// DNS hostname, since RFC 1123 hostnames may begin with a digit
+/// (e.g. `"0.pool.ntp.org"`).
 fn check_upstream_host(host: &str, ctx: &str) -> Result<(), ForgeError> {
     if host.is_empty() {
         return Err(ForgeError::Validation(format!("{ctx}: empty host")));
     }
-    if host.bytes().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        return check_upstream_ipv4(host, ctx);
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Ok(());
     }
     check_upstream_dns_name(host, ctx)
-}
-
-/// Validate an IPv4 address.
-fn check_upstream_ipv4(host: &str, ctx: &str) -> Result<(), ForgeError> {
-    host.parse::<std::net::Ipv4Addr>()
-        .map_err(|_err| ForgeError::Validation(format!("{ctx}: {host:?} is not a valid IPv4 address")))?;
-    Ok(())
 }
 
 /// Validate a DNS hostname (dot-separated lowercase DNS labels).
@@ -1992,6 +1989,9 @@ spec:
             vec!["dns.server:53"],
             vec!["my-resolver.internal"],
             vec!["10.0.0.1", "dns.server:53"],
+            // RFC 1123 hostnames may begin with a digit.
+            vec!["0.pool.ntp.org"],
+            vec!["1dot1dot1dot1.cloudflare-dns.com:53"],
         ];
         for upstreams in cases {
             let mut config = base_config();
