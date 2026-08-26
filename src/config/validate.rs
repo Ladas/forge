@@ -574,19 +574,53 @@ fn kahn_bfs(in_deg: &mut [usize], adj: &[Vec<usize>]) -> usize {
     visited
 }
 
-/// Reject duplicate host-port bindings across services.
+/// A parsed bind address, classified for conflict detection.
+#[derive(Debug, PartialEq, Eq)]
+enum BindAddr {
+    /// Publishes on all interfaces (unset, `0.0.0.0`, or `::`).
+    Wildcard,
+    /// Publishes on one specific address.
+    Specific(std::net::IpAddr),
+}
+
+/// Classify an optional bind address for conflict detection.
+///
+/// Unparseable addresses are treated as wildcard; per-port validation
+/// has already rejected them with a dedicated error by this point.
+fn parse_bind_addr(addr: Option<&str>) -> BindAddr {
+    match addr.and_then(|val| val.parse::<std::net::IpAddr>().ok()) {
+        Some(ip) if !ip.is_unspecified() => BindAddr::Specific(ip),
+        _ => BindAddr::Wildcard,
+    }
+}
+
+/// True when a candidate binding overlaps any already-seen binding.
+fn binds_conflict(seen: &[BindAddr], candidate: &BindAddr) -> bool {
+    seen.iter()
+        .any(|old| *old == BindAddr::Wildcard || *candidate == BindAddr::Wildcard || old == candidate)
+}
+
+/// Reject overlapping host-port bindings across services.
+///
+/// A wildcard bind (unset, `0.0.0.0`, or `::`) publishes on all
+/// interfaces, so it conflicts with every other binding of the same
+/// host port and protocol; two specific addresses conflict only when
+/// they are the same IP.
 fn check_service_port_conflicts(config: &ForgeConfig) -> Result<(), ForgeError> {
-    let mut seen = BTreeSet::new();
+    let mut seen: BTreeMap<(u16, String), Vec<BindAddr>> = BTreeMap::new();
     for svc in &config.spec.services {
         for port in &svc.ports {
-            let bind = port.bind_address.as_deref().unwrap_or("");
-            let key = (bind.to_owned(), port.host, port.protocol.clone());
-            if !seen.insert(key) {
+            let candidate = parse_bind_addr(port.bind_address.as_deref());
+            let entry = seen.entry((port.host, port.protocol.clone())).or_default();
+            if binds_conflict(entry, &candidate) {
                 return Err(ForgeError::Validation(format!(
                     "duplicate host port binding: {}:{}/{}",
-                    bind, port.host, port.protocol,
+                    port.bind_address.as_deref().unwrap_or("0.0.0.0"),
+                    port.host,
+                    port.protocol,
                 )));
             }
+            entry.push(candidate);
         }
     }
     Ok(())
@@ -1844,6 +1878,59 @@ spec:
         };
         let msg = err.to_string();
         assert!(msg.contains("duplicate"), "expected duplicate port error, got: {msg}");
+    }
+
+    /// Build two single-port services with the given bind addresses on port 8080.
+    fn two_services_with_binds(bind_a: Option<&str>, bind_b: Option<&str>) -> ForgeConfig {
+        let mut config = base_config();
+        let svc_a = test_service_with_port(PortMapping {
+            bind_address: bind_a.map(str::to_owned),
+            host: 8080,
+            container: 80,
+            protocol: "tcp".to_owned(),
+        });
+        let mut svc_b = test_service("other");
+        svc_b.ports = vec![PortMapping {
+            bind_address: bind_b.map(str::to_owned),
+            host: 8080,
+            container: 90,
+            protocol: "tcp".to_owned(),
+        }];
+        config.spec.services = vec![svc_a, svc_b];
+        config
+    }
+
+    #[test]
+    fn unset_bind_conflicts_with_explicit_wildcard() {
+        let config = two_services_with_binds(None, Some("0.0.0.0"));
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate"), "expected duplicate port error, got: {msg}");
+    }
+
+    #[test]
+    fn unset_bind_conflicts_with_specific_address() {
+        let config = two_services_with_binds(None, Some("127.0.0.1"));
+        assert!(
+            validate(&config).is_err(),
+            "unset bind publishes on all interfaces and must conflict with 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn same_specific_bind_conflicts() {
+        let config = two_services_with_binds(Some("127.0.0.1"), Some("127.0.0.1"));
+        assert!(validate(&config).is_err(), "same specific bind address must conflict");
+    }
+
+    #[test]
+    fn distinct_specific_binds_pass() {
+        let config = two_services_with_binds(Some("127.0.0.1"), Some("192.168.0.10"));
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]
