@@ -39,7 +39,7 @@ pub fn resolve(runner: &dyn CommandRunner, requested: &RuntimeProvider) -> Resul
 enum ProbeOutcome {
     /// The binary responded successfully.
     Available(ResolvedRuntime),
-    /// The binary ran but exited non-zero — present, daemon unreachable.
+    /// The binary ran but exited non-zero: present, daemon unreachable.
     NotResponding(String),
     /// The binary could not be executed at all.
     Missing,

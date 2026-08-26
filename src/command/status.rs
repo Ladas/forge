@@ -100,7 +100,7 @@ fn entry_for_cluster(
 ///
 /// `forge down` deletes every non-Gone cluster recorded in state, so a
 /// cluster removed from the config after it was created must still be
-/// visible here — hiding it would make status omit exactly the
+/// visible here; hiding it would make status omit exactly the
 /// resources the user is most likely to have forgotten about.
 fn state_only_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: Option<&[String]>) -> Vec<StatusEntry> {
     st.clusters

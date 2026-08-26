@@ -3,7 +3,7 @@
 //! State is stored as JSON in `<state_dir>/state.json`.  All writes
 //! are atomic: write to a temporary file, fsync, then rename.
 //! Atomicity protects against crashes, not against concurrent forge
-//! processes — mutating callers must hold the state lock (see
+//! processes: mutating callers must hold the state lock (see
 //! [`lock::acquire`] and the [`save`] docs).
 
 pub mod lock;
@@ -269,7 +269,7 @@ pub fn empty() -> ForgeState {
 /// reason other than not existing, or cannot be parsed. Only a true
 /// `NotFound` maps to an empty state: a `Path::exists()` pre-check
 /// would also swallow permission errors, symlink loops, and dangling
-/// symlinks as "fresh environment" — and race the file's presence.
+/// symlinks as "fresh environment", and race the file's presence.
 pub fn load(state_dir: &Path) -> Result<ForgeState, ForgeError> {
     let path = state_path(state_dir);
     match std::fs::read_to_string(&path) {
@@ -285,7 +285,7 @@ pub fn load(state_dir: &Path) -> Result<ForgeState, ForgeError> {
 /// another forge process could be running: every save goes through
 /// the single fixed temp path `state.json.tmp`, so two unlocked
 /// concurrent saves interleave their writes and rename torn JSON
-/// into place. This holds transitively — a helper that load-modify-
+/// into place. This holds transitively: a helper that load-modify-
 /// saves (e.g. `set_phase_saved` in `cluster.rs`) inherits the
 /// requirement even when the lock was taken frames above it.
 ///

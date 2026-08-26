@@ -847,7 +847,7 @@ fn render_foreach_step(property: &str, sub: &[StepSpec], tpl: &TemplateContext) 
 ///
 /// Config validation runs the same check on raw field values, but
 /// template rendering happens afterwards and captured values come
-/// from live cluster output — a lower-trust source than the config
+/// from live cluster output, a lower-trust source than the config
 /// file.  A rendered value starting with `-` would be interpreted as
 /// an option by helm or kubectl instead of a positional argument.
 fn check_rendered_not_option_like(value: &str, context: &str) -> Result<(), ForgeError> {

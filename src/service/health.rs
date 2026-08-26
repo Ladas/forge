@@ -63,7 +63,7 @@ fn bounded(value: Duration, raw: &str) -> Result<Duration, ForgeError> {
 ///
 /// `addr` may be an IPv4 literal, a bare IPv6 literal (no brackets
 /// needed), or a hostname.  Resolution goes through
-/// [`std::net::ToSocketAddrs`] on the `(addr, port)` pair — never a
+/// [`std::net::ToSocketAddrs`] on the `(addr, port)` pair, never a
 /// hand-formatted `"{addr}:{port}"` string, whose parse would silently
 /// reject hostnames and unbracketed IPv6 and look exactly like a
 /// closed port.  Every resolved candidate is tried until one connects.

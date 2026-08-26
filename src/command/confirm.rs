@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn non_tty_stdin_proceeds_without_prompting() {
         // Under the test harness stdin is not a terminal, so the
-        // prompt must be skipped and the action allowed — this is the
+        // prompt must be skipped and the action allowed; this is the
         // automation-preserving contract for scripts and CI.
         let proceed = confirm_destructive("delete everything", false).unwrap_or_else(|_| std::process::abort());
         assert!(proceed, "a non-TTY stdin must never block on a prompt");

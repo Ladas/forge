@@ -113,7 +113,7 @@ pub fn network_exists(runner: &dyn CommandRunner, binary: &str, net_name: &str) 
 
 /// Check whether inspect stderr reports a missing network rather than a fault.
 ///
-/// Only the runtimes' actual absent-network phrasings are accepted — not the
+/// Only the runtimes' actual absent-network phrasings are accepted, not the
 /// words "network" and "no such"/"not found" merely appearing somewhere in
 /// the message. With the daemon down, Docker reports "connect: no such file
 /// or directory", and a corrupted networking store reports "open

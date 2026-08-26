@@ -25,8 +25,8 @@ pub fn checkpoint(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Result<(
 /// Run one phase of a mutating command and persist whatever it
 /// recorded, pass or fail.
 ///
-/// Each phase creates or removes real resources — a network, KIND
-/// clusters, containers — before it can fail. Persisting only after
+/// Each phase creates or removes real resources, a network, KIND
+/// clusters, containers, before it can fail. Persisting only after
 /// every phase succeeded would leave state out of step with reality
 /// whenever a later phase fails: resources `up` created would be
 /// unrecorded (and `forge down` acts solely on what state records, so

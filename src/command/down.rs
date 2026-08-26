@@ -154,7 +154,7 @@ fn stop_services(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Resul
 /// Collect service teardown targets from config and state.
 ///
 /// Configured services come first, in reverse dependency order, then
-/// state-tracked services no longer present in the config — a service
+/// state-tracked services no longer present in the config, a service
 /// removed from the config after it was started must still be stopped,
 /// or its container would be orphaned with no supported way to remove
 /// it (`forge service stop` also refuses services outside the config).
