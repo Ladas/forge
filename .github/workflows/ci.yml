@@ -55,15 +55,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        id: toolchain
         with:
           components: clippy
+      # The toolchain cachekey keeps target-dir artifacts from outliving the
+      # rustc pin: without it a toolchain bump reuses a stale cache forever.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: clippy-${{ hashFiles('**/Cargo.lock') }}
+          key: clippy-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cargo/bin/cargo-machete
@@ -86,13 +89,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        id: toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: test-${{ hashFiles('**/Cargo.lock') }}
+          key: test-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo test --locked --features test-support
 
   doc:
@@ -108,13 +112,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
+        id: toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: doc-${{ hashFiles('**/Cargo.lock') }}
+          key: doc-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
       # Match `make doc`: private items carry the same deny-by-default
       # rustdoc lints, and test-support exposes the pub MockRunner docs.
       - run: cargo doc --locked --no-deps --document-private-items --features test-support
