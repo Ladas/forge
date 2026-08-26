@@ -391,8 +391,44 @@ fn state_path(state_dir: &Path) -> PathBuf {
 fn read_state(path: &Path) -> Result<ForgeState, ForgeError> {
     let content = std::fs::read_to_string(path)
         .map_err(|err| ForgeError::State(format!("cannot read {}: {err}", path.display())))?;
+    check_api_version(&content, path)?;
     serde_json::from_str(&content)
         .map_err(|err| ForgeError::State(format!("corrupt state file {}: {err}", path.display())))
+}
+
+/// Permissive probe for the state file's schema version.
+///
+/// Unlike [`ForgeState`], this struct tolerates unknown fields so a
+/// file written by any other forge version can still report which
+/// version produced it instead of surfacing as corruption.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionProbe {
+    /// Schema version declared by the file, if present.
+    #[serde(default)]
+    api_version: Option<String>,
+}
+
+/// Reject a state file written under a different schema version.
+///
+/// A file whose `apiVersion` differs from [`STATE_API_VERSION`] gets a
+/// dedicated error naming both versions, so version skew (e.g. an
+/// older binary reading a newer file) is not misreported as a corrupt
+/// file. A file with no `apiVersion` at all falls through to the
+/// strict parse, which reports the missing field.
+fn check_api_version(content: &str, path: &Path) -> Result<(), ForgeError> {
+    let probe: VersionProbe = serde_json::from_str(content)
+        .map_err(|err| ForgeError::State(format!("corrupt state file {}: {err}", path.display())))?;
+    if let Some(found) = probe.api_version
+        && found != STATE_API_VERSION
+    {
+        return Err(ForgeError::State(format!(
+            "state file {} was written by a different forge version: found apiVersion \
+             \"{found}\", this forge supports \"{STATE_API_VERSION}\"",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Write state to a temporary file in the state directory.
@@ -543,6 +579,42 @@ mod tests {
             }
         });
         assert!(state.clusters.is_empty(), "missing file should yield empty state");
+    }
+
+    #[test]
+    fn load_rejects_state_from_different_version() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let path = dir.path().join(STATE_FILE);
+        std::fs::write(&path, r#"{"apiVersion":"forge.praxis.dev/state/v9","newField":true}"#)
+            .unwrap_or_else(|_| std::process::abort());
+        let err = load(dir.path()).err().unwrap_or_else(|| std::process::abort());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("different forge version"),
+            "version skew should not be reported as corruption: {msg}"
+        );
+        assert!(
+            msg.contains("forge.praxis.dev/state/v9"),
+            "error should name the file's version: {msg}"
+        );
+        assert!(
+            msg.contains(STATE_API_VERSION),
+            "error should name the supported version: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_same_version_with_unknown_field_reports_corrupt() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let path = dir.path().join(STATE_FILE);
+        let content = format!(r#"{{"apiVersion":"{STATE_API_VERSION}","unknownField":1}}"#);
+        std::fs::write(&path, content).unwrap_or_else(|_| std::process::abort());
+        let err = load(dir.path()).err().unwrap_or_else(|| std::process::abort());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("corrupt state file"),
+            "same-version unknown field should stay a corruption error: {msg}"
+        );
     }
 
     #[test]
