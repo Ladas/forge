@@ -3,7 +3,12 @@
 //! External tool invocations go through [`CommandRunner`] so tests
 //! can inject a `MockRunner` and verify calls without side effects.
 
-use std::{collections::BTreeMap, ffi::OsString, fmt};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::error::ForgeError;
 
@@ -88,8 +93,7 @@ pub struct SystemRunner;
 impl CommandRunner for SystemRunner {
     fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, ForgeError> {
         let mut cmd = build_process(spec);
-        let output = run_process(&mut cmd, spec)?;
-        Ok(into_command_output(&output))
+        run_process(&mut cmd, spec)
     }
 }
 
@@ -113,38 +117,128 @@ fn configure_stdio(cmd: &mut std::process::Command, pipe_stdin: bool) {
     cmd.stderr(std::process::Stdio::piped());
 }
 
-/// Execute a prepared command, optionally piping stdin data.
-fn run_process(cmd: &mut std::process::Command, spec: &CommandSpec) -> Result<std::process::Output, ForgeError> {
-    match &spec.stdin {
-        Some(data) => run_with_stdin(cmd, data, spec),
-        None => cmd.output().map_err(|err| command_error(spec, &err)),
+/// Wall-clock limit for a single external command.
+///
+/// A stalled child (a wedged `kind`, a hung `kubectl apply -f -`) is killed
+/// once this elapses instead of blocking forge forever while it holds the
+/// state lock.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Maximum bytes retained from a child's stdout or stderr.
+///
+/// Reading continues past the cap so the child never blocks on a full pipe,
+/// but only this prefix is kept, bounding memory against a runaway child.
+const MAX_CAPTURED_BYTES: usize = 100 * 1024 * 1024;
+
+/// Interval between child completion polls.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Execute a prepared command with the default timeout and output cap.
+fn run_process(cmd: &mut std::process::Command, spec: &CommandSpec) -> Result<CommandOutput, ForgeError> {
+    run_with_limits(cmd, spec, COMMAND_TIMEOUT, MAX_CAPTURED_BYTES)
+}
+
+/// Spawn the child, capture bounded output, and enforce a timeout.
+///
+/// Stdout and stderr are drained by reader threads so a child that floods a
+/// pipe cannot deadlock the parent, and stdin (when present) is written from
+/// its own thread for the same reason. The child is killed if `timeout`
+/// elapses before it exits.
+fn run_with_limits(
+    cmd: &mut std::process::Command,
+    spec: &CommandSpec,
+    timeout: Duration,
+    cap: usize,
+) -> Result<CommandOutput, ForgeError> {
+    let mut child = cmd.spawn().map_err(|err| command_error(spec, &err))?;
+    let stdin_writer = spec
+        .stdin
+        .as_deref()
+        .and_then(|data| spawn_stdin_writer(&mut child, data));
+    let out_reader = child.stdout.take().map(|handle| spawn_reader(handle, cap));
+    let err_reader = child.stderr.take().map(|handle| spawn_reader(handle, cap));
+    let status = wait_with_timeout(&mut child, spec, timeout)?;
+    let stdout = join_reader(out_reader);
+    let stderr = join_reader(err_reader);
+    finish_stdin_writer(stdin_writer, status, spec)?;
+    Ok(build_output(status, &stdout, &stderr))
+}
+
+/// Wait for the child, killing it once `timeout` elapses.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    spec: &CommandSpec,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, ForgeError> {
+    let deadline = Instant::now().checked_add(timeout);
+    loop {
+        if let Some(status) = child.try_wait().map_err(|err| command_error(spec, &err))? {
+            return Ok(status);
+        }
+        if deadline.is_some_and(|dl| Instant::now() >= dl) {
+            let _kill = child.kill();
+            let _reap = child.wait();
+            return Err(timeout_error(spec, timeout));
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
-/// Spawn a child process and write data to its standard input.
-///
-/// Stdin is written from a separate thread while the parent drains
-/// stdout/stderr via `wait_with_output`.  Writing synchronously first
-/// would deadlock once the child fills the OS pipe buffer with output
-/// before consuming all of its stdin (e.g. `kubectl apply -f -` on a
-/// large multi-document manifest).
-fn run_with_stdin(
-    cmd: &mut std::process::Command,
-    data: &[u8],
-    spec: &CommandSpec,
-) -> Result<std::process::Output, ForgeError> {
-    let mut child = cmd.spawn().map_err(|err| command_error(spec, &err))?;
-    let writer = spawn_stdin_writer(&mut child, data);
-    let output = child.wait_with_output().map_err(|err| command_error(spec, &err))?;
-
-    match join_stdin_writer(writer) {
-        Ok(()) => Ok(output),
-        // A child can reject the command and close stdin before the parent
-        // finishes writing. Preserve its exit status and captured stderr so
-        // the caller reports the primary failure instead of a secondary EPIPE.
-        Err(_error) if !output.status.success() => Ok(output),
-        Err(error) => Err(command_error(spec, &error)),
+/// Build the timeout error for a command that exceeded its deadline.
+fn timeout_error(spec: &CommandSpec, timeout: Duration) -> ForgeError {
+    ForgeError::Command {
+        program: spec.program.to_string_lossy().into_owned(),
+        message: format!("timed out after {}s and was killed", timeout.as_secs()),
     }
+}
+
+/// A captured, possibly-truncated output stream.
+struct Captured {
+    /// Bytes captured up to the cap.
+    bytes: Vec<u8>,
+    /// Whether output beyond the cap was discarded.
+    truncated: bool,
+}
+
+/// Read a child pipe into memory up to `cap` bytes.
+///
+/// Reading continues past the cap so the child never blocks on a full pipe;
+/// only the capped prefix is retained and the stream is flagged truncated.
+fn spawn_reader<R: std::io::Read + Send + 'static>(mut reader: R, cap: usize) -> std::thread::JoinHandle<Captured> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let mut truncated = false;
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => append_capped(&mut bytes, chunk.get(..read).unwrap_or(&[]), cap, &mut truncated),
+            }
+        }
+        Captured { bytes, truncated }
+    })
+}
+
+/// Append bytes to a buffer, stopping at `cap` and flagging truncation.
+fn append_capped(buf: &mut Vec<u8>, data: &[u8], cap: usize, truncated: &mut bool) {
+    let remaining = cap.saturating_sub(buf.len());
+    let take = remaining.min(data.len());
+    if take > 0 {
+        buf.extend_from_slice(data.get(..take).unwrap_or(data));
+    }
+    if take < data.len() {
+        *truncated = true;
+    }
+}
+
+/// Join a reader thread, yielding an empty capture if it panicked.
+fn join_reader(reader: Option<std::thread::JoinHandle<Captured>>) -> Captured {
+    reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_else(|| Captured {
+            bytes: Vec::new(),
+            truncated: false,
+        })
 }
 
 /// Handle to a background thread writing a child's stdin.
@@ -160,23 +254,45 @@ fn spawn_stdin_writer(child: &mut std::process::Child, data: &[u8]) -> Option<St
     }))
 }
 
-/// Join the stdin writer thread, mapping a panic to an IO error.
-fn join_stdin_writer(writer: Option<StdinWriter>) -> std::io::Result<()> {
-    match writer {
-        None => Ok(()),
+/// Join the stdin writer, tolerating an early close when the child failed.
+///
+/// A child can reject its input and close stdin before the parent finishes
+/// writing. When the command already failed, preserve its exit status and
+/// stderr rather than surfacing a secondary broken-pipe error.
+fn finish_stdin_writer(
+    writer: Option<StdinWriter>,
+    status: std::process::ExitStatus,
+    spec: &CommandSpec,
+) -> Result<(), ForgeError> {
+    let joined = match writer {
+        None => return Ok(()),
         Some(handle) => handle
             .join()
             .unwrap_or_else(|_| Err(std::io::Error::other("stdin writer thread panicked"))),
+    };
+    match joined {
+        Ok(()) => Ok(()),
+        Err(_error) if !status.success() => Ok(()),
+        Err(error) => Err(command_error(spec, &error)),
     }
 }
 
-/// Convert a process output reference into a [`CommandOutput`].
-fn into_command_output(output: &std::process::Output) -> CommandOutput {
+/// Assemble a [`CommandOutput`] from an exit status and captured streams.
+fn build_output(status: std::process::ExitStatus, stdout: &Captured, stderr: &Captured) -> CommandOutput {
     CommandOutput {
-        status: status_code(output.status),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        status: status_code(status),
+        stdout: decode_captured(stdout),
+        stderr: decode_captured(stderr),
     }
+}
+
+/// Decode captured bytes lossily, noting truncation when it occurred.
+fn decode_captured(captured: &Captured) -> String {
+    let mut text = String::from_utf8_lossy(&captured.bytes).into_owned();
+    if captured.truncated {
+        text.push_str("\n[output truncated: exceeded capture limit]");
+    }
+    text
 }
 
 /// Map an exit status to a numeric code.
@@ -546,5 +662,38 @@ mod tests {
         assert_eq!(output.status, 0);
         assert_eq!(output.stdout, "manifest");
         assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn system_runner_times_out_and_kills_a_slow_child() {
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            redact: Vec::new(),
+        };
+        let mut cmd = build_process(&spec);
+        let Err(err) = run_with_limits(&mut cmd, &spec, Duration::from_millis(100), MAX_CAPTURED_BYTES) else {
+            std::process::abort();
+        };
+        assert!(err.to_string().contains("timed out"), "should report a timeout: {err}");
+    }
+
+    #[test]
+    fn system_runner_caps_captured_output() {
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "head -c 1000 /dev/zero".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            redact: Vec::new(),
+        };
+        let mut cmd = build_process(&spec);
+        let output = run_with_limits(&mut cmd, &spec, COMMAND_TIMEOUT, 100).unwrap_or_else(|_| std::process::abort());
+        assert!(
+            output.stdout.contains("truncated"),
+            "capped output should note truncation"
+        );
     }
 }
