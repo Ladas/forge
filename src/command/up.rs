@@ -32,10 +32,10 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
     let mut state = state::load(&ctx.state_dir)?;
     state.runtime = Some(resolved.binary.clone());
     let binary = resolved.binary.as_str();
-    let net_result = checkpointed(ctx, &mut state, |st| ensure_network(ctx, binary, st))?;
-    let results = checkpointed(ctx, &mut state, |st| create_clusters(ctx, st))?;
+    let net_result = checkpointed(ctx, &mut state, "up", |st| ensure_network(ctx, binary, st))?;
+    let results = checkpointed(ctx, &mut state, "up", |st| create_clusters(ctx, st))?;
     export_kubeconfigs(ctx, &state)?;
-    let svc_results = checkpointed(ctx, &mut state, |st| start_services(ctx, binary, st))?;
+    let svc_results = checkpointed(ctx, &mut state, "up", |st| start_services(ctx, binary, st))?;
     update_digest(ctx, &mut state)?;
     record_operation(&mut state, "up", true);
     checkpoint(ctx, &state)?;
@@ -1195,6 +1195,11 @@ spec:
             Some(NetworkPhase::Active),
             "the recorded network should be marked active"
         );
+        let Some(op) = persisted.last_operation else {
+            std::process::abort();
+        };
+        assert_eq!(op.operation, "up", "the failed run must be the last operation");
+        assert!(!op.success, "a failed phase must not be recorded as a success");
     }
 
     #[test]
@@ -1259,7 +1264,7 @@ spec:
         };
 
         let mut state = state::empty();
-        let outcome: Result<(), ForgeError> = checkpointed(&ctx, &mut state, |_st| {
+        let outcome: Result<(), ForgeError> = checkpointed(&ctx, &mut state, "up", |_st| {
             Err(ForgeError::State("phase blew up".to_owned()))
         });
 

@@ -29,9 +29,9 @@ use crate::{
 pub fn run(ctx: &ForgeContext<'_>, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut st = state::load(&ctx.state_dir)?;
-    let svc_results = checkpointed(ctx, &mut st, |state| stop_services(ctx, state))?;
-    let results = checkpointed(ctx, &mut st, |state| delete_clusters(ctx, state))?;
-    let net_result = checkpointed(ctx, &mut st, |state| remove_env_network(ctx, state))?;
+    let svc_results = checkpointed(ctx, &mut st, "down", |state| stop_services(ctx, state))?;
+    let results = checkpointed(ctx, &mut st, "down", |state| delete_clusters(ctx, state))?;
+    let net_result = checkpointed(ctx, &mut st, "down", |state| remove_env_network(ctx, state))?;
     record_operation(&mut st, "down", true);
     checkpoint(ctx, &st)?;
     render_all(writer, &svc_results, &results, net_result.as_ref(), &ctx.format)
@@ -735,14 +735,7 @@ spec:
             "docker network inspect test-net --format {{json .Labels}}",
             foreign_labels(),
         );
-        let ctx = ForgeContext {
-            runner: &runner,
-            config: &config,
-            state_dir: dir.path().to_path_buf(),
-            config_dir: dir.path().to_path_buf(),
-            format: OutputFormat::Text,
-            dry_run: false,
-        };
+        let ctx = test_ctx(&runner, &config, &dir);
 
         let mut buf = Vec::new();
         let result = run(&ctx, false, &mut buf);
@@ -754,6 +747,11 @@ spec:
             state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
             Some(ClusterPhase::Gone),
             "a deleted cluster must be recorded Gone even when a later phase fails"
+        );
+        assert_eq!(
+            st.last_operation.map(|op| (op.operation, op.success)),
+            Some(("down".to_owned(), false)),
+            "the failed run must be recorded as an unsuccessful down"
         );
     }
 

@@ -30,18 +30,27 @@ pub fn checkpoint(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Result<(
 /// resources `down` already removed would still be reported as
 /// running.
 ///
+/// A failed phase is also recorded as the last operation (with
+/// `success: false`) before the checkpoint: the failure ends the run,
+/// and leaving a previous run's successful entry in the state file
+/// would misrepresent history to anyone inspecting it.
+///
 /// # Errors
 ///
 /// Returns the phase's error if it failed, otherwise any checkpoint error.
 pub fn checkpointed<T, Phase>(
     ctx: &ForgeContext<'_>,
     state: &mut state::ForgeState,
+    operation: &str,
     phase: Phase,
 ) -> Result<T, ForgeError>
 where
     Phase: FnOnce(&mut state::ForgeState) -> Result<T, ForgeError>,
 {
     let outcome = phase(state);
+    if outcome.is_err() {
+        record_operation(state, operation, false);
+    }
     let persisted = checkpoint(ctx, state);
     match (outcome, persisted) {
         (Ok(value), Ok(())) => Ok(value),
