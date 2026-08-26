@@ -161,7 +161,8 @@ fn apply_one(
     match engine::apply_stack(ctx, cluster, name, spec, network.as_ref(), &st.captures) {
         Ok(outcome) => {
             if let Some(alloc) = &outcome.pool_allocation {
-                record_pool_allocation(st, &cluster.name, alloc);
+                let network_name = crate::networking::network_name(&ctx.config.metadata.name);
+                record_pool_allocation(st, &network_name, &cluster.name, alloc);
             }
             record_captures(st, &cluster.name, &outcome.captures);
             upsert_stack_state(st, name, &cluster.name, StackPhase::Applied, digest.as_deref());
@@ -360,20 +361,35 @@ fn cluster_index(ctx: &ForgeContext<'_>, name: &str) -> usize {
 }
 
 /// Record a newly computed pool allocation in state.
-fn record_pool_allocation(st: &mut state::ForgeState, cluster: &str, alloc: &engine::PoolAllocation) {
-    if let Some(ref mut net) = st.network {
-        if net.cidr.as_deref() != Some(&alloc.cidr) {
-            net.cidr = Some(alloc.cidr.clone());
-            net.cluster_pools.clear();
-        }
-        if let Some(existing) = net.cluster_pools.iter_mut().find(|pool| pool.cluster == cluster) {
-            alloc.range.clone_into(&mut existing.range);
-        } else {
-            net.cluster_pools.push(ClusterPool {
-                cluster: cluster.to_owned(),
-                range: alloc.range.clone(),
-            });
-        }
+///
+/// When no network state exists yet (a cross-cluster stack applied
+/// before `up` recorded the network), an active entry is initialised
+/// so the computed allocation is not silently dropped: the pool was
+/// derived by inspecting the live container network, which therefore
+/// exists.
+fn record_pool_allocation(
+    st: &mut state::ForgeState,
+    network_name: &str,
+    cluster: &str,
+    alloc: &engine::PoolAllocation,
+) {
+    let net = st.network.get_or_insert_with(|| state::NetworkState {
+        name: network_name.to_owned(),
+        phase: state::NetworkPhase::Active,
+        cidr: None,
+        cluster_pools: Vec::new(),
+    });
+    if net.cidr.as_deref() != Some(&alloc.cidr) {
+        net.cidr = Some(alloc.cidr.clone());
+        net.cluster_pools.clear();
+    }
+    if let Some(existing) = net.cluster_pools.iter_mut().find(|pool| pool.cluster == cluster) {
+        alloc.range.clone_into(&mut existing.range);
+    } else {
+        net.cluster_pools.push(ClusterPool {
+            cluster: cluster.to_owned(),
+            range: alloc.range.clone(),
+        });
     }
 }
 
@@ -967,6 +983,28 @@ mod tests {
     }
 
     #[test]
+    fn record_pool_allocation_initialises_missing_network_state() {
+        let mut st = state::empty();
+        let allocation = engine::PoolAllocation {
+            cidr: "172.18.0.0/16".to_owned(),
+            range: "172.18.255.231-172.18.255.250".to_owned(),
+        };
+
+        record_pool_allocation(&mut st, "test-net", "hub", &allocation);
+
+        let network = st.network.as_ref().unwrap_or_else(|| std::process::abort());
+        assert_eq!(network.name, "test-net", "network state must carry the network name");
+        assert_eq!(network.phase, state::NetworkPhase::Active);
+        assert_eq!(network.cidr.as_deref(), Some("172.18.0.0/16"));
+        let pool = network.cluster_pools.first().unwrap_or_else(|| std::process::abort());
+        assert_eq!(pool.cluster, "hub");
+        assert_eq!(
+            pool.range, allocation.range,
+            "allocation must be persisted, not dropped"
+        );
+    }
+
+    #[test]
     fn record_pool_allocation_replaces_stale_network_allocations() {
         let mut st = state::empty();
         st.network = Some(state::NetworkState {
@@ -983,7 +1021,7 @@ mod tests {
             range: "172.18.255.231-172.18.255.250".to_owned(),
         };
 
-        record_pool_allocation(&mut st, "hub", &allocation);
+        record_pool_allocation(&mut st, "test-net", "hub", &allocation);
 
         let network = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(network.cidr.as_deref(), Some("172.18.0.0/16"));
@@ -1010,7 +1048,7 @@ mod tests {
             range: "172.18.255.231-172.18.255.250".to_owned(),
         };
 
-        record_pool_allocation(&mut st, "hub", &allocation);
+        record_pool_allocation(&mut st, "test-net", "hub", &allocation);
 
         let network = st.network.as_ref().unwrap_or_else(|| std::process::abort());
         assert_eq!(network.cluster_pools.len(), 1);
