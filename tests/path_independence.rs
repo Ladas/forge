@@ -136,15 +136,12 @@ fn version_flag_prints_version() {
 
 #[test]
 fn state_dir_flag_is_deterministic() {
-    // `status` runs `kind get clusters`. Presence on PATH is not enough — an
-    // installed kind with no reachable daemon fails the same way — so the guard
-    // runs the real probe. Without it the command fails for reasons that have
-    // nothing to do with path independence.
-    if !kind_usable() {
-        note_skip("state_dir_flag_is_deterministic: `kind get clusters` does not succeed");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+    // `status` runs `kind get clusters`. A stub `kind` prepended to PATH
+    // answers with an empty cluster list, so the probe is deterministic on
+    // every machine instead of depending on a real kind installation (absent
+    // on CI runners) with a reachable daemon.
+    let stub_path = stub_kind_path(dir.path());
     let config_path = fixtures_dir().join("glb-demo.yaml");
 
     let empty_dir = dir.path().join("empty-state");
@@ -154,8 +151,8 @@ fn state_dir_flag_is_deterministic() {
 
     // Path independence: the same state dir must give the same answer from any
     // working directory.
-    let from_tmp = status_json(&config_path, &seeded_dir, &std::env::temp_dir());
-    let from_fixtures = status_json(&config_path, &seeded_dir, &fixtures_dir());
+    let from_tmp = status_json(&config_path, &seeded_dir, &std::env::temp_dir(), &stub_path);
+    let from_fixtures = status_json(&config_path, &seeded_dir, &fixtures_dir(), &stub_path);
     assert_eq!(
         from_tmp, from_fixtures,
         "status output must not depend on the working directory"
@@ -163,7 +160,7 @@ fn state_dir_flag_is_deterministic() {
 
     // The flag itself: reading a seeded state dir must differ from reading an
     // empty one. Without this the test passes with --state-dir deleted.
-    let from_empty = status_json(&config_path, &empty_dir, &std::env::temp_dir());
+    let from_empty = status_json(&config_path, &empty_dir, &std::env::temp_dir(), &stub_path);
     assert_ne!(
         from_tmp, from_empty,
         "--state-dir must select which state is read, but both dirs gave the same output"
@@ -180,8 +177,27 @@ const SEEDED_STATE: &str = concat!(
     r#""network":{"name":"glb-demo-net","phase":"active","cidr":"172.30.0.0/16"}}"#
 );
 
-/// Run `status --output json` from `cwd` and return stdout.
-fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
+/// Install a stub `kind` reporting an empty cluster list; return a PATH
+/// value that resolves the stub before any real installation.
+fn stub_kind_path(dir: &Path) -> std::ffi::OsString {
+    let stub_dir = dir.join("stub-bin");
+    std::fs::create_dir_all(&stub_dir).unwrap_or_else(|_| std::process::abort());
+    let stub = stub_dir.join("kind");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap_or_else(|_| std::process::abort());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|_| std::process::abort());
+    }
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let entries = std::iter::once(stub_dir).chain(std::env::split_paths(&existing));
+    std::env::join_paths(entries).unwrap_or_else(|_| std::process::abort())
+}
+
+/// Run `status --output json` from `cwd` with `path_env` as PATH and
+/// return stdout.
+fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path, path_env: &std::ffi::OsStr) -> String {
     let output = std::process::Command::new(forge_binary())
         .arg("--config")
         .arg(config_path)
@@ -190,6 +206,7 @@ fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
         .arg("--output")
         .arg("json")
         .arg("status")
+        .env("PATH", path_env)
         .current_dir(cwd)
         .output()
         .unwrap_or_else(|_| std::process::abort());
@@ -200,24 +217,6 @@ fn status_json(config_path: &Path, state_dir: &Path, cwd: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// Report a skipped test on stderr.
-#[expect(
-    clippy::print_stderr,
-    reason = "a skipped test must say so; this mirrors the exception in src/main.rs"
-)]
-fn note_skip(message: &str) {
-    eprintln!("skipping {message}");
-}
-
-/// Check whether `kind` is present AND able to answer a cluster query.
-fn kind_usable() -> bool {
-    std::process::Command::new("kind")
-        .arg("get")
-        .arg("clusters")
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 #[test]
