@@ -67,7 +67,7 @@ fn dispatch_config(
         ConfigCommand::Init { force } => {
             config::run_init(&cli.global.config, *force, cli.global.dry_run, format, writer)
         },
-        ConfigCommand::Schema => config::run_schema(writer),
+        ConfigCommand::Schema => config::run_schema(format, writer),
     }
 }
 

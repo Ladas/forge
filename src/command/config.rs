@@ -144,13 +144,25 @@ fn report_init_success(config_path: &Path, format: &OutputFormat, writer: &mut d
 
 /// Run `config schema`.
 ///
+/// Text mode emits the bare schema; JSON mode wraps it in the stable
+/// [`crate::output::CommandResult`] envelope like every other command.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn run_schema(writer: &mut dyn Write) -> Result<(), ForgeError> {
+pub fn run_schema(format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let schema = config::schema::generate();
-    let json = serde_json::to_string_pretty(&schema).map_err(|err| ForgeError::Config(err.to_string()))?;
-    output::write_text(writer, &json)?;
+    match format {
+        OutputFormat::Json => {
+            let result = output::success(schema);
+            output::write_json(writer, &result)?;
+        },
+        OutputFormat::Text => {
+            let json = serde_json::to_string_pretty(&schema)
+                .map_err(|err| ForgeError::Internal(format!("schema serialization: {err}")))?;
+            output::write_text(writer, &json)?;
+        },
+    }
     Ok(())
 }
 
@@ -235,7 +247,7 @@ mod tests {
     #[test]
     fn config_schema_produces_valid_json() {
         let mut buf = Vec::new();
-        run_schema(&mut buf).unwrap_or_else(|_| std::process::abort());
+        run_schema(&OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         let text = String::from_utf8_lossy(&buf);
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
             std::process::abort();
@@ -245,5 +257,27 @@ mod tests {
             }
         });
         assert!(parsed.is_object(), "schema should be valid JSON object");
+    }
+
+    #[test]
+    fn config_schema_json_mode_uses_envelope() {
+        let mut buf = Vec::new();
+        run_schema(&OutputFormat::Json, &mut buf).unwrap_or_else(|_| std::process::abort());
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                serde_json::Value::Null
+            }
+        });
+        assert_eq!(
+            parsed.get("kind").and_then(serde_json::Value::as_str),
+            Some("CommandResult"),
+            "JSON mode should wrap the schema in the envelope"
+        );
+        assert!(
+            parsed.get("data").and_then(|data| data.get("$schema")).is_some(),
+            "envelope data should carry the schema"
+        );
     }
 }

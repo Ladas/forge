@@ -43,4 +43,8 @@ pub enum ForgeError {
     /// Could not acquire or release a file lock.
     #[error("lock error: {0}")]
     Lock(String),
+
+    /// An internal invariant failed (a bug in Forge, not user input).
+    #[error("internal error: {0}")]
+    Internal(String),
 }
