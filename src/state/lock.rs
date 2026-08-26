@@ -145,6 +145,26 @@ mod tests {
     }
 
     #[test]
+    fn lock_excludes_second_handle_until_guard_drops() {
+        use fs2::FileExt as _;
+
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let state_dir = dir.path().join("state");
+        let guard = acquire(&state_dir).unwrap_or_else(|_| std::process::abort());
+        // Advisory locks are per file handle, so a second handle to the
+        // same path must contend even within one process.
+        let second = open_lock_file(&lock_path(&state_dir)).unwrap_or_else(|_| std::process::abort());
+        let contended = second.try_lock_exclusive().err();
+        assert_eq!(
+            contended.map(|err| err.kind()),
+            Some(std::io::ErrorKind::WouldBlock),
+            "second handle must not acquire the lock while the guard is held"
+        );
+        drop(guard);
+        second.try_lock_exclusive().unwrap_or_else(|_| std::process::abort());
+    }
+
+    #[test]
     fn acquire_creates_state_dir() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| {
             std::process::abort();
