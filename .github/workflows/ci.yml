@@ -27,10 +27,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # rustfmt.toml relies on nightly-only options (group_imports,
+      # imports_granularity, ...) and `make fmt`/`make lint` format with
+      # nightly rustfmt; stable rustfmt would silently check a different
+      # effective configuration.
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
+          toolchain: nightly
           components: rustfmt
-      - run: cargo fmt --check
+      - run: cargo +nightly fmt --all -- --check
 
   clippy:
     name: Clippy
