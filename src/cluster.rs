@@ -109,8 +109,7 @@ fn handle_kubectl(
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     let result = kind_ops::run_kubectl(ctx.runner, &kind_name, args)?;
-    output::write_text(writer, &result.stdout)?;
-    Ok(())
+    report_kubectl_result(writer, &result, &ctx.format)
 }
 
 // ---------------------------------------------------------------
@@ -176,6 +175,40 @@ fn update_phase_gone(ctx: &ForgeContext<'_>, name: &str) -> Result<(), ForgeErro
         cs.phase = ClusterPhase::Gone;
     }
     state::save(&ctx.state_dir, &st)
+}
+
+/// Report a kubectl invocation's output, propagating its exit status.
+///
+/// On success, stdout is written as text or wrapped in the JSON
+/// envelope. On failure, any stdout is still written in text mode
+/// (kubectl may have printed partial diagnostics) and the non-zero
+/// exit surfaces as [`ForgeError::Command`] carrying kubectl's
+/// stderr, so scripts gating on Forge's exit code see the failure.
+fn report_kubectl_result(
+    writer: &mut dyn Write,
+    result: &crate::command::runner::CommandOutput,
+    format: &OutputFormat,
+) -> Result<(), ForgeError> {
+    match format {
+        OutputFormat::Json => {
+            if result.status == 0 {
+                let envelope = output::success(serde_json::json!({ "stdout": result.stdout }));
+                output::write_json(writer, &envelope)?;
+            }
+        },
+        OutputFormat::Text => {
+            if !result.stdout.is_empty() {
+                output::write_text(writer, &result.stdout)?;
+            }
+        },
+    }
+    if result.status != 0 {
+        return Err(ForgeError::Command {
+            program: "kubectl".to_owned(),
+            message: format!("exit code {}: {}", result.status, result.stderr.trim()),
+        });
+    }
+    Ok(())
 }
 
 /// Write kubeconfig to file or writer.
@@ -370,6 +403,74 @@ spec:
             cluster.map(|cs| cs.phase.clone()),
             Some(ClusterPhase::Running),
             "adopted cluster should be Running"
+        );
+    }
+
+    #[test]
+    fn kubectl_failure_surfaces_stderr_and_errors() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kubectl",
+            CommandOutput {
+                status: 1,
+                stdout: "partial output\n".to_owned(),
+                stderr: "Error from server (NotFound): namespaces \"missing-ns\" not found\n".to_owned(),
+            },
+        );
+        let ctx = test_ctx(&runner, &config, &dir);
+        let cmd = ClusterCommand::Kubectl {
+            name: "hub".to_owned(),
+            args: vec!["get".to_owned(), "pods".to_owned()],
+        };
+
+        let mut buf = Vec::new();
+        let err = match dispatch(&ctx, &cmd, &mut buf) {
+            Ok(()) => std::process::abort(),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("kubectl"), "error should name kubectl: {msg}");
+        assert!(msg.contains("exit code 1"), "error should carry exit code: {msg}");
+        assert!(msg.contains("NotFound"), "error should carry kubectl stderr: {msg}");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("partial output"),
+            "stdout should still be written: {text}"
+        );
+    }
+
+    #[test]
+    fn kubectl_success_json_uses_envelope() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kubectl", stdout_ok("pod-a\n"));
+        let mut ctx = test_ctx(&runner, &config, &dir);
+        ctx.format = OutputFormat::Json;
+        let cmd = ClusterCommand::Kubectl {
+            name: "hub".to_owned(),
+            args: vec!["get".to_owned(), "pods".to_owned()],
+        };
+
+        let text = run_dispatch(&ctx, &cmd);
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                serde_json::Value::Null
+            }
+        });
+        assert_eq!(
+            parsed.get("status").and_then(|val| val.as_str()),
+            Some("Success"),
+            "JSON output should be a success envelope: {text}"
+        );
+        assert_eq!(
+            parsed.pointer("/data/stdout").and_then(|val| val.as_str()),
+            Some("pod-a\n"),
+            "envelope should carry kubectl stdout: {text}"
         );
     }
 
