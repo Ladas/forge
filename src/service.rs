@@ -445,16 +445,22 @@ fn rm_spec(binary: &str, name: &str) -> CommandSpec {
     build_spec(binary, vec!["rm".into(), "-f".into(), name.into()])
 }
 
-/// Build a `<binary> inspect <name>` command spec.
+/// Build a `<binary> container inspect <name>` command spec.
+///
+/// The `container` subcommand scopes the inspect to containers only.
+/// A bare `inspect` resolves any object kind, so an image, volume, or
+/// network sharing the deterministic container name would be mistaken
+/// for a live container.
 fn inspect_spec(binary: &str, name: &str) -> CommandSpec {
-    build_spec(binary, vec!["inspect".into(), name.into()])
+    build_spec(binary, vec!["container".into(), "inspect".into(), name.into()])
 }
 
-/// Build a `<binary> inspect --format ... <name>` spec for labels.
+/// Build a `<binary> container inspect --format ... <name>` spec for labels.
 fn labels_spec(binary: &str, name: &str) -> CommandSpec {
     build_spec(
         binary,
         vec![
+            "container".into(),
             "inspect".into(),
             "--format".into(),
             "{{json .Config.Labels}}".into(),
@@ -463,11 +469,12 @@ fn labels_spec(binary: &str, name: &str) -> CommandSpec {
     )
 }
 
-/// Build a `<binary> inspect --format ...` spec for identity fields.
+/// Build a `<binary> container inspect --format ...` spec for identity fields.
 fn identity_spec(binary: &str, name: &str) -> CommandSpec {
     build_spec(
         binary,
         vec![
+            "container".into(),
             "inspect".into(),
             "--format".into(),
             r#"{"containerId":{{json .Id}},"startedAt":{{json .State.StartedAt}},"restartCount":{{json .RestartCount}}}"#.into(),
@@ -1013,7 +1020,7 @@ mod tests {
     #[test]
     fn start_creates_new_container() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", not_found());
+        runner.respond("docker container inspect test-env-test-svc", not_found());
         runner.respond("docker", ok());
 
         let params = test_params();
@@ -1026,9 +1033,9 @@ mod tests {
     #[test]
     fn start_replaces_existing_owned() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", ok());
+        runner.respond("docker container inspect test-env-test-svc", ok());
         runner.respond(
-            "docker inspect --format {{json .Config.Labels}} test-env-test-svc",
+            "docker container inspect --format {{json .Config.Labels}} test-env-test-svc",
             owned_labels("test-env"),
         );
         runner.respond("docker stop test-env-test-svc", ok());
@@ -1046,9 +1053,9 @@ mod tests {
     #[test]
     fn start_rejects_unowned() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", ok());
+        runner.respond("docker container inspect test-env-test-svc", ok());
         runner.respond(
-            "docker inspect --format {{json .Config.Labels}} test-env-test-svc",
+            "docker container inspect --format {{json .Config.Labels}} test-env-test-svc",
             foreign_labels(),
         );
 
@@ -1061,9 +1068,9 @@ mod tests {
     #[test]
     fn stop_removes_owned() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", ok());
+        runner.respond("docker container inspect test-env-test-svc", ok());
         runner.respond(
-            "docker inspect --format {{json .Config.Labels}} test-env-test-svc",
+            "docker container inspect --format {{json .Config.Labels}} test-env-test-svc",
             owned_labels("test-env"),
         );
         runner.respond("docker stop test-env-test-svc", ok());
@@ -1078,7 +1085,7 @@ mod tests {
     #[test]
     fn stop_skips_absent() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", not_found());
+        runner.respond("docker container inspect test-env-test-svc", not_found());
 
         let params = test_params();
         stop_service(&runner, &params).unwrap_or_else(|_| std::process::abort());
@@ -1088,9 +1095,9 @@ mod tests {
     #[test]
     fn stop_rejects_unowned() {
         let mut runner = MockRunner::new();
-        runner.respond("docker inspect test-env-test-svc", ok());
+        runner.respond("docker container inspect test-env-test-svc", ok());
         runner.respond(
-            "docker inspect --format {{json .Config.Labels}} test-env-test-svc",
+            "docker container inspect --format {{json .Config.Labels}} test-env-test-svc",
             foreign_labels(),
         );
 
@@ -1609,10 +1616,22 @@ mod tests {
         let spec = identity_spec("docker", "my-container");
         assert_eq!(spec.program, "docker", "program");
         let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
-        assert_eq!(args.first().map(AsRef::as_ref), Some("inspect"), "first arg");
-        assert_eq!(args.get(1).map(AsRef::as_ref), Some("--format"), "second arg");
+        assert_eq!(args.first().map(AsRef::as_ref), Some("container"), "first arg");
+        assert_eq!(args.get(1).map(AsRef::as_ref), Some("inspect"), "second arg");
+        assert_eq!(args.get(2).map(AsRef::as_ref), Some("--format"), "third arg");
         assert_eq!(args.last().map(AsRef::as_ref), Some("my-container"), "last arg");
         assert!(spec.stdin.is_none(), "no stdin");
+    }
+
+    #[test]
+    fn inspect_spec_scopes_to_containers() {
+        let spec = inspect_spec("docker", "my-container");
+        let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(
+            args.as_slice(),
+            &["container", "inspect", "my-container"],
+            "existence check must not resolve images, volumes, or networks"
+        );
     }
 
     #[test]
