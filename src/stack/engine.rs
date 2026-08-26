@@ -718,6 +718,22 @@ fn render_foreach_step(property: &str, sub: &[StepSpec], tpl: &TemplateContext) 
     })
 }
 
+/// Reject a rendered value that would be consumed as a flag.
+///
+/// Config validation runs the same check on raw field values, but
+/// template rendering happens afterwards and captured values come
+/// from live cluster output — a lower-trust source than the config
+/// file.  A rendered value starting with `-` would be interpreted as
+/// an option by helm or kubectl instead of a positional argument.
+fn check_rendered_not_option_like(value: &str, context: &str) -> Result<(), ForgeError> {
+    if value.starts_with('-') {
+        return Err(ForgeError::Config(format!(
+            "{context}: rendered value '{value}' must not start with '-'"
+        )));
+    }
+    Ok(())
+}
+
 /// Render templates in a capture step (resource and namespace only).
 fn render_capture_step(step: &StepSpec, tpl: &TemplateContext) -> Result<StepSpec, ForgeError> {
     let StepSpec::Capture {
@@ -731,8 +747,10 @@ fn render_capture_step(step: &StepSpec, tpl: &TemplateContext) -> Result<StepSpe
     else {
         return Err(ForgeError::Config("expected Capture step".to_owned()));
     };
+    let resource = template::render(resource, tpl)?;
+    check_rendered_not_option_like(&resource, "capture resource")?;
     Ok(StepSpec::Capture {
-        resource: template::render(resource, tpl)?,
+        resource,
         namespace: render_optional(namespace.as_ref(), tpl)?,
         jsonpath: jsonpath.clone(),
         key: key.clone(),
@@ -753,10 +771,14 @@ fn render_helm_step(step: &StepSpec, tpl: &TemplateContext) -> Result<StepSpec, 
     else {
         return Err(ForgeError::Config("expected Helm step".to_owned()));
     };
+    let chart = template::render(chart, tpl)?;
+    check_rendered_not_option_like(&chart, "helm chart")?;
+    let version = template::render(version, tpl)?;
+    check_rendered_not_option_like(&version, "helm version")?;
     Ok(StepSpec::Helm {
         release: template::render(release, tpl)?,
-        chart: template::render(chart, tpl)?,
-        version: template::render(version, tpl)?,
+        chart,
+        version,
         namespace: render_optional(namespace.as_ref(), tpl)?,
         values: render_values(values, tpl)?,
     })
@@ -835,8 +857,10 @@ fn render_wait_step(step: &StepSpec, tpl: &TemplateContext) -> Result<StepSpec, 
     else {
         return Err(ForgeError::Config("expected Wait step".to_owned()));
     };
+    let resource = template::render(resource, tpl)?;
+    check_rendered_not_option_like(&resource, "wait resource")?;
     Ok(StepSpec::Wait {
-        resource: template::render(resource, tpl)?,
+        resource,
         condition: template::render(condition, tpl)?,
         timeout: template::render(timeout, tpl)?,
         namespace: render_optional(namespace.as_ref(), tpl)?,
@@ -1337,6 +1361,73 @@ mod tests {
         assert_eq!(
             values.get("image").and_then(|val| val.get("replicas")),
             Some(&serde_json::json!(2))
+        );
+    }
+
+    /// Template context whose captures hold an option-like value.
+    fn option_like_capture_tpl(key: &str) -> TemplateContext {
+        let mut tpl = make_template_context();
+        tpl.captures = BTreeMap::from([(
+            "east".to_owned(),
+            BTreeMap::from([(key.to_owned(), "--post-renderer=/tmp/evil".to_owned())]),
+        )]);
+        tpl
+    }
+
+    #[test]
+    fn render_rejects_option_like_helm_chart() {
+        let tpl = option_like_capture_tpl("chart");
+        let step = StepSpec::Helm {
+            release: "web".to_owned(),
+            chart: "{{ captures.east.chart }}".to_owned(),
+            version: "1.0.0".to_owned(),
+            namespace: None,
+            values: BTreeMap::new(),
+        };
+        let Err(err) = render_step(&step, &tpl) else {
+            std::process::abort();
+        };
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "rendered option-like chart must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn render_rejects_option_like_wait_resource() {
+        let tpl = option_like_capture_tpl("resource");
+        let step = StepSpec::Wait {
+            resource: "{{ captures.east.resource }}".to_owned(),
+            condition: "available".to_owned(),
+            timeout: "60s".to_owned(),
+            namespace: None,
+        };
+        let Err(err) = render_step(&step, &tpl) else {
+            std::process::abort();
+        };
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "rendered option-like wait resource must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn render_rejects_option_like_capture_resource() {
+        let tpl = option_like_capture_tpl("resource");
+        let step = StepSpec::Capture {
+            resource: "{{ captures.east.resource }}".to_owned(),
+            namespace: None,
+            jsonpath: "{.spec.clusterIP}".to_owned(),
+            key: "ip".to_owned(),
+            timeout: "1s".to_owned(),
+            interval: "1ms".to_owned(),
+        };
+        let Err(err) = render_step(&step, &tpl) else {
+            std::process::abort();
+        };
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "rendered option-like capture resource must be rejected: {err}"
         );
     }
 
