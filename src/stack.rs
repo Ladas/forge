@@ -92,10 +92,16 @@ fn handle_status(
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
     let st = state::load(&ctx.state_dir)?;
-    let entries = filter_stack_states(&st, cluster_filter);
+    let rows: Vec<StatusRow<'_>> = filter_stack_states(&st, cluster_filter)
+        .into_iter()
+        .map(|entry| StatusRow {
+            entry,
+            drifted: stack_drifted(ctx, entry),
+        })
+        .collect();
     match &ctx.format {
-        OutputFormat::Json => render_status_json(&entries, writer),
-        OutputFormat::Text => render_status_text(&entries, writer),
+        OutputFormat::Json => render_status_json(&rows, writer),
+        OutputFormat::Text => render_status_text(&rows, writer),
     }
 }
 
@@ -291,6 +297,28 @@ fn stack_digest(spec: &StackSpec) -> Result<String, ForgeError> {
         .map_err(|err| ForgeError::State(format!("cannot serialize stack spec for digest: {err}")))?;
     let hash = sha2::Sha256::digest(json.as_bytes());
     Ok(format!("{hash:x}"))
+}
+
+/// One stack status row with computed drift.
+struct StatusRow<'st> {
+    /// Persisted stack state entry.
+    entry: &'st StackState,
+    /// Whether the configured spec has drifted from the applied
+    /// digest (`None` when drift cannot be determined).
+    drifted: Option<bool>,
+}
+
+/// Compare a stored stack digest against the currently configured spec.
+///
+/// Returns `Some(true)` when the spec has changed since the recorded
+/// apply, `Some(false)` when it still matches, and `None` when drift
+/// cannot be determined (no digest was recorded, or the stack is no
+/// longer present in the config).
+fn stack_drifted(ctx: &ForgeContext<'_>, entry: &StackState) -> Option<bool> {
+    let stored = entry.digest.as_deref()?;
+    let spec = ctx.config.spec.stacks.get(&entry.name)?;
+    let fresh = stack_digest(spec).ok()?;
+    Some(stored != fresh)
 }
 
 /// Filter stack states by optional cluster name.
@@ -519,31 +547,36 @@ fn render_apply_text(cluster: &str, results: &[ApplyResult], writer: &mut dyn Wr
 // -------------------------------------------------------------
 
 /// Render status as JSON.
-fn render_status_json(entries: &[&StackState], writer: &mut dyn Write) -> Result<(), ForgeError> {
-    let stacks: Vec<serde_json::Value> = entries.iter().map(|entry| status_entry(entry)).collect();
+fn render_status_json(rows: &[StatusRow<'_>], writer: &mut dyn Write) -> Result<(), ForgeError> {
+    let stacks: Vec<serde_json::Value> = rows.iter().map(status_entry).collect();
     let data = serde_json::json!({ "stacks": stacks });
     let result = output::success(data);
     output::write_json(writer, &result)?;
     Ok(())
 }
 
-/// Build a JSON entry for one stack state.
-fn status_entry(entry: &StackState) -> serde_json::Value {
+/// Build a JSON entry for one stack status row.
+fn status_entry(row: &StatusRow<'_>) -> serde_json::Value {
     serde_json::json!({
-        "name": entry.name,
-        "cluster": entry.cluster,
-        "phase": format!("{:?}", entry.phase).to_lowercase(),
-        "digest": entry.digest,
-        "timestamp": entry.timestamp,
+        "name": row.entry.name,
+        "cluster": row.entry.cluster,
+        "phase": format!("{:?}", row.entry.phase).to_lowercase(),
+        "digest": row.entry.digest,
+        "timestamp": row.entry.timestamp,
+        "drifted": row.drifted,
     })
 }
 
 /// Render status as text.
-fn render_status_text(entries: &[&StackState], writer: &mut dyn Write) -> Result<(), ForgeError> {
-    output::write_text(writer, &format!("Stacks: {}", entries.len()))?;
-    for entry in entries {
-        let phase = format!("{:?}", entry.phase).to_lowercase();
-        output::write_text(writer, &format!("  {}/{}: {phase}", entry.cluster, entry.name))?;
+fn render_status_text(rows: &[StatusRow<'_>], writer: &mut dyn Write) -> Result<(), ForgeError> {
+    output::write_text(writer, &format!("Stacks: {}", rows.len()))?;
+    for row in rows {
+        let phase = format!("{:?}", row.entry.phase).to_lowercase();
+        let drift_note = if row.drifted == Some(true) { " (drifted)" } else { "" };
+        output::write_text(
+            writer,
+            &format!("  {}/{}: {phase}{drift_note}", row.entry.cluster, row.entry.name),
+        )?;
     }
     Ok(())
 }
@@ -819,6 +852,75 @@ mod tests {
         assert_eq!(entry.phase, StackPhase::Applying);
         assert_eq!(entry.digest.as_deref(), Some("new"));
         assert!(entry.error.is_none(), "retry must clear the previous failure");
+    }
+
+    /// Build an applied stack state entry for drift tests.
+    fn applied_state_entry(name: &str, digest: Option<String>) -> StackState {
+        StackState {
+            name: name.to_owned(),
+            cluster: "hub".to_owned(),
+            phase: StackPhase::Applied,
+            digest,
+            timestamp: 0,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn stack_drifted_detects_spec_change() {
+        let config = test_config();
+        let runner = crate::command::runner::MockRunner::new();
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: std::path::PathBuf::from("/tmp/state"),
+            config_dir: std::path::PathBuf::from("/tmp"),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+        let stale = applied_state_entry("base", Some("0".repeat(64)));
+        assert_eq!(stack_drifted(&ctx, &stale), Some(true), "changed spec must drift");
+        let spec = config.spec.stacks.get("base").unwrap_or_else(|| std::process::abort());
+        let fresh = applied_state_entry("base", stack_digest(spec).ok());
+        assert_eq!(stack_drifted(&ctx, &fresh), Some(false), "matching spec must not drift");
+        let unknown = applied_state_entry("base", None);
+        assert_eq!(stack_drifted(&ctx, &unknown), None, "missing digest is indeterminate");
+        let removed = applied_state_entry("gone", Some("0".repeat(64)));
+        assert_eq!(
+            stack_drifted(&ctx, &removed),
+            None,
+            "unconfigured stack is indeterminate"
+        );
+    }
+
+    #[test]
+    fn status_text_marks_drifted_stack() {
+        let entry = applied_state_entry("base", Some("0".repeat(64)));
+        let rows = vec![StatusRow {
+            entry: &entry,
+            drifted: Some(true),
+        }];
+        let mut buf = Vec::new();
+        render_status_text(&rows, &mut buf).unwrap_or_else(|_| std::process::abort());
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.contains("hub/base"), "should list the stack: {text}");
+        assert!(text.contains("(drifted)"), "should flag drift: {text}");
+    }
+
+    #[test]
+    fn status_json_reports_drift_field() {
+        let entry = applied_state_entry("base", Some("0".repeat(64)));
+        let rows = vec![StatusRow {
+            entry: &entry,
+            drifted: Some(true),
+        }];
+        let mut buf = Vec::new();
+        render_status_json(&rows, &mut buf).unwrap_or_else(|_| std::process::abort());
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap_or_else(|_| std::process::abort());
+        let drifted = parsed
+            .pointer("/data/stacks/0/drifted")
+            .unwrap_or_else(|| std::process::abort());
+        assert_eq!(drifted, &serde_json::Value::Bool(true), "JSON must expose drift");
     }
 
     #[test]
