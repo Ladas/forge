@@ -142,6 +142,15 @@ fn handle_kubectl(
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
+    // kubectl can mutate the cluster (apply/delete/patch/scale/...), so a
+    // dry run must report the planned invocation without executing it.
+    if ctx.dry_run {
+        let msg = format!(
+            "would run kubectl against cluster '{name}' (kind name: {kind_name}): {}",
+            args.join(" ")
+        );
+        return report_text_or_json(writer, &msg, &ctx.format);
+    }
     let result = kind_ops::run_kubectl(ctx.runner, &kind_name, args)?;
     report_kubectl_result(writer, &result, &ctx.format)
 }
@@ -673,6 +682,64 @@ spec:
         );
         let content = std::fs::read_to_string(&out_path).unwrap_or_else(|_| std::process::abort());
         assert_eq!(content, "original content\n", "dry run must not overwrite the out-file");
+    }
+
+    #[test]
+    fn kubectl_dry_run_does_not_execute() {
+        let dir = test_dir();
+        let config = test_config();
+        let runner = MockRunner::new();
+        let mut ctx = test_ctx(&runner, &config, &dir);
+        ctx.dry_run = true;
+        let cmd = ClusterCommand::Kubectl {
+            name: "hub".to_owned(),
+            args: vec!["apply".to_owned(), "-f".to_owned(), "manifest.yaml".to_owned()],
+        };
+
+        let text = run_dispatch(&ctx, &cmd);
+
+        assert_eq!(runner.call_count(), 0, "dry run must not execute kubectl");
+        assert!(
+            text.contains("would run kubectl against cluster 'hub'"),
+            "should report the planned invocation: {text}"
+        );
+        assert!(
+            text.contains("apply -f manifest.yaml"),
+            "should echo the kubectl args: {text}"
+        );
+    }
+
+    #[test]
+    fn kubectl_dry_run_json_reports_plan_without_executing() {
+        let dir = test_dir();
+        let config = test_config();
+        let runner = MockRunner::new();
+        let mut ctx = test_ctx(&runner, &config, &dir);
+        ctx.dry_run = true;
+        ctx.format = OutputFormat::Json;
+        let cmd = ClusterCommand::Kubectl {
+            name: "hub".to_owned(),
+            args: vec!["delete".to_owned(), "ns".to_owned(), "prod".to_owned()],
+        };
+
+        let text = run_dispatch(&ctx, &cmd);
+
+        assert_eq!(runner.call_count(), 0, "dry run must not execute kubectl");
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                serde_json::Value::Null
+            }
+        });
+        let msg = parsed
+            .pointer("/data/message")
+            .and_then(|val| val.as_str())
+            .unwrap_or_default();
+        let status = parsed.get("status").and_then(|val| val.as_str());
+        assert_eq!(status, Some("Success"), "success envelope");
+        assert!(msg.contains("would run kubectl against cluster 'hub'"), "plan: {text}");
+        assert!(msg.contains("delete ns prod"), "args: {text}");
     }
 
     #[test]
