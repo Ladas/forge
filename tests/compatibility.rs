@@ -1,8 +1,9 @@
 //! Compatibility tests for representative Forge configurations.
 //!
 //! Validates that configurations derived from Grid and MaaS/IPP demo
-//! topologies load, validate, and produce correct plans from the
-//! standalone Forge binary — without requiring a Grid checkout.
+//! topologies load and validate through the library config API, and
+//! asserts the parsed shape of each topology — without requiring a
+//! Grid checkout. Plan generation is not exercised here.
 
 #![allow(clippy::tests_outside_test_module, reason = "integration tests live in tests/")]
 
