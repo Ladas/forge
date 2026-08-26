@@ -7,6 +7,7 @@ use std::io::Write;
 
 use crate::{
     cluster::{kind as kind_ops, kubeconfig},
+    command::checkpoint::{checkpoint, checkpointed, record_operation},
     config::ClusterSpec,
     context::ForgeContext,
     error::ForgeError,
@@ -40,60 +41,6 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
     checkpoint(ctx, &state)?;
     render_all(writer, net_result.as_ref(), &results, &svc_results, &ctx.format)
 }
-
-// ---------------------------------------------------------------
-// Checkpointing
-// ---------------------------------------------------------------
-
-/// Persist the working state, unless this is a dry run.
-///
-/// # Errors
-///
-/// Returns [`ForgeError`] if the state file cannot be written.
-fn checkpoint(ctx: &ForgeContext<'_>, state: &state::ForgeState) -> Result<(), ForgeError> {
-    if ctx.dry_run {
-        return Ok(());
-    }
-    state::save(&ctx.state_dir, state)
-}
-
-/// Run one phase of `up` and persist whatever it recorded, pass or fail.
-///
-/// Each phase creates real resources — a network, KIND clusters,
-/// containers — before it can fail. Persisting only after every phase
-/// succeeded would leave those resources unrecorded whenever a later
-/// phase fails, and `forge down` acts solely on what state records, so
-/// they would be orphaned with no supported way to remove them.
-///
-/// # Errors
-///
-/// Returns the phase's error if it failed, otherwise any checkpoint error.
-fn checkpointed<T>(
-    ctx: &ForgeContext<'_>,
-    state: &mut state::ForgeState,
-    phase: impl FnOnce(&mut state::ForgeState) -> Result<T, ForgeError>,
-) -> Result<T, ForgeError> {
-    let outcome = phase(state);
-    let persisted = checkpoint(ctx, state);
-    match (outcome, persisted) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(save_err)) => Err(save_err),
-        (Err(phase_err), Ok(())) => Err(phase_err),
-        // Both failing is the one case that must not be reported as either one
-        // alone: the phase error is what stopped the run, but a lost checkpoint
-        // means the resources it already created are unrecorded, and a user
-        // told only "cluster creation failed" would expect `down` to clean up.
-        (Err(phase_err), Err(save_err)) => Err(ForgeError::State(format!(
-            "{phase_err}; the state file could not be written either, so \
-             resources created before the failure are not recorded and \
-             `forge down` will not remove them: {save_err}"
-        ))),
-    }
-}
-
-// ---------------------------------------------------------------
-// Cluster creation
-// ---------------------------------------------------------------
 
 // ---------------------------------------------------------------
 // Network setup
@@ -449,15 +396,6 @@ fn upsert_svc_state(
 fn update_digest(ctx: &ForgeContext<'_>, state: &mut state::ForgeState) -> Result<(), ForgeError> {
     state.config_digest = Some(state::config_digest(ctx.config)?);
     Ok(())
-}
-
-/// Record the last operation in state.
-fn record_operation(state: &mut state::ForgeState, operation: &str, success: bool) {
-    state.last_operation = Some(state::LastOperation {
-        operation: operation.to_owned(),
-        timestamp: state::now_epoch_secs(),
-        success,
-    });
 }
 
 // ---------------------------------------------------------------

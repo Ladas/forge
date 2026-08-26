@@ -7,6 +7,7 @@ use std::io::Write;
 
 use crate::{
     cluster::kind as kind_ops,
+    command::checkpoint::{checkpoint, checkpointed, record_operation},
     context::ForgeContext,
     error::ForgeError,
     networking,
@@ -17,6 +18,10 @@ use crate::{
 
 /// Run the `down` command.
 ///
+/// Each teardown phase is checkpointed so that resources already
+/// removed stay recorded as gone even when a later phase fails;
+/// re-running `down` then converges instead of reporting stale state.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if cluster deletion or state
@@ -24,13 +29,11 @@ use crate::{
 pub fn run(ctx: &ForgeContext<'_>, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut st = state::load(&ctx.state_dir)?;
-    let svc_results = stop_services(ctx, &mut st)?;
-    let results = delete_clusters(ctx, &mut st)?;
-    let net_result = remove_env_network(ctx, &mut st)?;
+    let svc_results = checkpointed(ctx, &mut st, |state| stop_services(ctx, state))?;
+    let results = checkpointed(ctx, &mut st, |state| delete_clusters(ctx, state))?;
+    let net_result = checkpointed(ctx, &mut st, |state| remove_env_network(ctx, state))?;
     record_operation(&mut st, "down", true);
-    if !ctx.dry_run {
-        state::save(&ctx.state_dir, &st)?;
-    }
+    checkpoint(ctx, &st)?;
     render_all(writer, &svc_results, &results, net_result.as_ref(), &ctx.format)
 }
 
@@ -226,15 +229,6 @@ fn mark_network_gone(state: &mut state::ForgeState) {
         ns.cidr = None;
         ns.cluster_pools.clear();
     }
-}
-
-/// Record the last operation in state.
-fn record_operation(state: &mut state::ForgeState, operation: &str, success: bool) {
-    state.last_operation = Some(state::LastOperation {
-        operation: operation.to_owned(),
-        timestamp: state::now_epoch_secs(),
-        success,
-    });
 }
 
 // ---------------------------------------------------------------
@@ -525,6 +519,51 @@ spec:
         assert_network_allocation_cleared(dir.path());
         let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("removed network"), "should report removal: {text}");
+    }
+
+    /// Labels JSON owned by a different environment.
+    fn foreign_labels() -> CommandOutput {
+        CommandOutput {
+            status: 0,
+            stdout: r#"{"forge.managed":"true","forge.environment":"other"}"#.to_owned(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn down_persists_earlier_phases_when_later_phase_fails() {
+        let dir = test_dir();
+        seed_state_with_network(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind", ok());
+        runner.respond("docker network inspect test-net", ok());
+        // The network belongs to another environment, so removal fails
+        // after the clusters were already deleted.
+        runner.respond(
+            "docker network inspect test-net --format {{json .Labels}}",
+            foreign_labels(),
+        );
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let mut buf = Vec::new();
+        let result = run(&ctx, false, &mut buf);
+
+        assert!(result.is_err(), "an ownership mismatch should fail the run");
+        assert!(runner.was_called("kind delete cluster"), "cluster phase should run");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Gone),
+            "a deleted cluster must be recorded Gone even when a later phase fails"
+        );
     }
 
     #[test]

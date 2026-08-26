@@ -1,5 +1,6 @@
 //! Command dispatch and shared command infrastructure.
 
+pub mod checkpoint;
 pub mod config;
 pub mod doctor;
 pub mod down;
