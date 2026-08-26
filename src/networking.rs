@@ -103,7 +103,7 @@ pub fn network_exists(runner: &dyn CommandRunner, binary: &str, net_name: &str) 
     // A non-zero exit means "absent" only when the runtime says so. Reporting
     // absent for e.g. a stopped daemon makes `remove_network` a silent no-op,
     // and `down` then records the network as Gone while it is still there.
-    if is_absent_error(&output.stderr) {
+    if is_absent_error(&output.stderr, net_name) {
         return Ok(false);
     }
     // Reuses the shared error shape; the Ok arm is unreachable because a zero
@@ -113,21 +113,24 @@ pub fn network_exists(runner: &dyn CommandRunner, binary: &str, net_name: &str) 
 
 /// Check whether inspect stderr reports a missing network rather than a fault.
 ///
-/// The message has to name a network *and* report it missing. Matching absence
-/// wording alone is not enough: with the daemon down, Docker reports
-/// "connect: no such file or directory", which says "no such" while proving
-/// nothing about the network. Treating that as absence is precisely the bug
-/// this function exists to prevent.
+/// Only the runtimes' actual absent-network phrasings are accepted — not the
+/// words "network" and "no such"/"not found" merely appearing somewhere in
+/// the message. With the daemon down, Docker reports "connect: no such file
+/// or directory", and a corrupted networking store reports "open
+/// /var/lib/docker/network/files/local-kv.db: no such file or directory":
+/// both carry absence wording (the latter even the word "network") while
+/// proving nothing about the network itself. Treating either as absence is
+/// precisely the bug this function exists to prevent.
 ///
-/// Real absent-network wording, all of which names a network:
+/// Recognised absent-network wording:
 /// - Docker: `Error: No such network: x`
 /// - Docker: `Error response from daemon: network x not found`
 /// - Podman: `unable to find network with name or ID x: network not found`
-fn is_absent_error(stderr: &str) -> bool {
+fn is_absent_error(stderr: &str, net_name: &str) -> bool {
     let lower = stderr.to_lowercase();
-    let names_a_network = lower.contains("network");
-    let reports_absence = lower.contains("not found") || lower.contains("no such");
-    names_a_network && reports_absence
+    lower.contains("no such network")
+        || lower.contains("network not found")
+        || lower.contains(&format!("network {} not found", net_name.to_lowercase()))
 }
 
 /// Read the current IPv4 subnet from a container network.
@@ -535,7 +538,7 @@ mod tests {
             "unable to find network with name or ID test-net: network not found",
         ] {
             assert!(
-                is_absent_error(stderr),
+                is_absent_error(stderr, "test-net"),
                 "real absent-network wording should be recognised: {stderr}"
             );
         }
@@ -550,9 +553,13 @@ mod tests {
              Is the docker daemon running?",
             "Error: context \"missing\" not found",
             "permission denied while trying to connect to the Docker daemon socket",
+            // Networking-store corruption: contains both "network" and
+            // "no such", yet says nothing about the network's existence.
+            "Error response from daemon: open /var/lib/docker/network/files/local-kv.db: \
+             no such file or directory",
         ] {
             assert!(
-                !is_absent_error(stderr),
+                !is_absent_error(stderr, "test-net"),
                 "a runtime fault must not read as absence: {stderr}"
             );
         }
