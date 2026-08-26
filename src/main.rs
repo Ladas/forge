@@ -129,7 +129,7 @@ fn dispatch_down(cli: &Cli, force: bool, writer: &mut dyn std::io::Write) -> Res
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config)?;
-    down::run(&ctx, force, writer)
+    down::run(&ctx, force || cli.global.non_interactive, writer)
 }
 
 /// Dispatch the `status` command.
@@ -164,7 +164,7 @@ fn dispatch_cluster(cli: &Cli, sub: &ClusterCommand, writer: &mut dyn std::io::W
     let config = load_config_validated(cli)?;
     let runner = runner::SystemRunner;
     let ctx = build_context(cli, &runner, &config)?;
-    cluster::dispatch(&ctx, sub, writer)
+    cluster::dispatch(&ctx, sub, cli.global.non_interactive, writer)
 }
 
 /// Handle the result of command dispatch.

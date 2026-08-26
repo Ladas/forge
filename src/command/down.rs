@@ -7,7 +7,10 @@ use std::io::Write;
 
 use crate::{
     cluster::kind as kind_ops,
-    command::checkpoint::{checkpoint, checkpointed, record_operation},
+    command::{
+        checkpoint::{checkpoint, checkpointed, record_operation},
+        confirm,
+    },
     context::ForgeContext,
     error::ForgeError,
     networking,
@@ -18,15 +21,23 @@ use crate::{
 
 /// Run the `down` command.
 ///
-/// Each teardown phase is checkpointed so that resources already
-/// removed stay recorded as gone even when a later phase fails;
-/// re-running `down` then converges instead of reporting stale state.
+/// On an interactive terminal the teardown asks for confirmation
+/// first unless `skip_confirm` (`--force` or `--non-interactive`) is
+/// set; non-TTY invocations never prompt.  Each teardown phase is
+/// checkpointed so that resources already removed stay recorded as
+/// gone even when a later phase fails; re-running `down` then
+/// converges instead of reporting stale state.
 ///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if cluster deletion or state
 /// persistence fails.
-pub fn run(ctx: &ForgeContext<'_>, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
+pub fn run(ctx: &ForgeContext<'_>, skip_confirm: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
+    if !ctx.dry_run
+        && !confirm::confirm_destructive("delete all managed services, clusters, and networks", skip_confirm)?
+    {
+        return confirm::report_declined(writer, &ctx.format);
+    }
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut st = state::load(&ctx.state_dir)?;
     let svc_results = checkpointed(ctx, &mut st, "down", |state| stop_services(ctx, state))?;

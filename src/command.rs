@@ -2,6 +2,7 @@
 
 pub mod checkpoint;
 pub mod config;
+pub mod confirm;
 pub mod doctor;
 pub mod down;
 pub mod plan;

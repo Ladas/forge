@@ -11,6 +11,7 @@ use std::io::Write;
 use crate::{
     cli::ClusterCommand,
     cluster::kind as kind_ops,
+    command::confirm,
     context::ForgeContext,
     error::ForgeError,
     output::{self, OutputFormat},
@@ -19,13 +20,21 @@ use crate::{
 
 /// Dispatch a cluster subcommand.
 ///
+/// `non_interactive` (the global `--non-interactive` flag) suppresses
+/// the confirmation prompt of destructive subcommands.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn dispatch(ctx: &ForgeContext<'_>, cmd: &ClusterCommand, writer: &mut dyn Write) -> Result<(), ForgeError> {
+pub fn dispatch(
+    ctx: &ForgeContext<'_>,
+    cmd: &ClusterCommand,
+    non_interactive: bool,
+    writer: &mut dyn Write,
+) -> Result<(), ForgeError> {
     match cmd {
         ClusterCommand::Create { name } => handle_create(ctx, name, writer),
-        ClusterCommand::Delete { name, force } => handle_delete(ctx, name, *force, writer),
+        ClusterCommand::Delete { name, force } => handle_delete(ctx, name, *force || non_interactive, writer),
         ClusterCommand::List => handle_list(ctx, writer),
         ClusterCommand::Kubeconfig { name, out_file } => handle_kubeconfig(ctx, name, out_file.as_ref(), writer),
         ClusterCommand::LoadImage { name, image } => handle_load_image(ctx, name, image, writer),
@@ -57,13 +66,24 @@ fn handle_create(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> 
 
 /// Handle `cluster delete`.
 ///
-/// A tracked cluster is marked `Deleting` (and saved) before the
-/// delete runs, so a crash mid-delete leaves a diagnosable record
-/// instead of an entry still claiming `Running`.
-fn handle_delete(ctx: &ForgeContext<'_>, name: &str, _force: bool, writer: &mut dyn Write) -> Result<(), ForgeError> {
+/// On an interactive terminal the delete asks for confirmation first
+/// unless `skip_confirm` (`--force` or `--non-interactive`) is set;
+/// non-TTY invocations never prompt.  A tracked cluster is marked
+/// `Deleting` (and saved) before the delete runs, so a crash
+/// mid-delete leaves a diagnosable record instead of an entry still
+/// claiming `Running`.
+fn handle_delete(
+    ctx: &ForgeContext<'_>,
+    name: &str,
+    skip_confirm: bool,
+    writer: &mut dyn Write,
+) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
         return report_dry_run(writer, "would delete cluster", name, &kind_name, &ctx.format);
+    }
+    if !confirm::confirm_destructive(&format!("delete cluster '{name}'"), skip_confirm)? {
+        return confirm::report_declined(writer, &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut st = state::load(&ctx.state_dir)?;
@@ -417,7 +437,7 @@ spec:
     /// Dispatch a command and return the captured output text.
     fn run_dispatch(ctx: &ForgeContext<'_>, cmd: &ClusterCommand) -> String {
         let mut buf = Vec::new();
-        dispatch(ctx, cmd, &mut buf).unwrap_or_else(|_| std::process::abort());
+        dispatch(ctx, cmd, false, &mut buf).unwrap_or_else(|_| std::process::abort());
         String::from_utf8_lossy(&buf).into_owned()
     }
 
@@ -472,7 +492,12 @@ spec:
         let ctx = test_ctx(&runner, &config, &dir);
 
         let mut buf = Vec::new();
-        let result = dispatch(&ctx, &ClusterCommand::Create { name: "hub".to_owned() }, &mut buf);
+        let result = dispatch(
+            &ctx,
+            &ClusterCommand::Create { name: "hub".to_owned() },
+            false,
+            &mut buf,
+        );
 
         assert!(result.is_err(), "a failing create should fail the command");
         let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
@@ -506,6 +531,7 @@ spec:
                 name: "hub".to_owned(),
                 force: false,
             },
+            false,
             &mut buf,
         );
 
@@ -538,7 +564,7 @@ spec:
         };
 
         let mut buf = Vec::new();
-        let err = match dispatch(&ctx, &cmd, &mut buf) {
+        let err = match dispatch(&ctx, &cmd, false, &mut buf) {
             Ok(()) => std::process::abort(),
             Err(err) => err,
         };

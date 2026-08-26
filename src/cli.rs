@@ -43,7 +43,9 @@ pub struct GlobalOptions {
     #[arg(long, global = true)]
     pub dry_run: bool,
 
-    /// Suppress interactive prompts.
+    /// Suppress interactive confirmation prompts, proceeding as if
+    /// confirmed.  Prompts only appear on a terminal; scripted runs
+    /// (stdin not a TTY) never prompt.
     #[arg(long, global = true)]
     pub non_interactive: bool,
 }
@@ -62,7 +64,9 @@ pub enum Command {
     Up,
     /// Tear down all clusters.
     Down {
-        /// Skip confirmation and force-delete clusters.
+        /// Skip the confirmation prompt and force-delete clusters.
+        /// The prompt only appears on an interactive terminal;
+        /// non-TTY runs proceed without asking.
         #[arg(long)]
         force: bool,
     },
@@ -102,7 +106,9 @@ pub enum ClusterCommand {
     Delete {
         /// Cluster name.
         name: String,
-        /// Skip confirmation and force-delete.
+        /// Skip the confirmation prompt and force-delete.  The
+        /// prompt only appears on an interactive terminal; non-TTY
+        /// runs proceed without asking.
         #[arg(long)]
         force: bool,
     },
