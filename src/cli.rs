@@ -106,9 +106,11 @@ pub enum ClusterCommand {
     Delete {
         /// Cluster name.
         name: String,
-        /// Skip the confirmation prompt and force-delete.  The
-        /// prompt only appears on an interactive terminal; non-TTY
-        /// runs proceed without asking.
+        /// Skip the confirmation prompt and force-delete, including a
+        /// cluster not tracked in Forge state.  The prompt only appears
+        /// on an interactive terminal; non-TTY runs proceed without
+        /// asking, but an untracked cluster is still refused unless this
+        /// flag is set.
         #[arg(long)]
         force: bool,
     },

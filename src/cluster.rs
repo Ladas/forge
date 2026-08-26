@@ -34,7 +34,7 @@ pub fn dispatch(
 ) -> Result<(), ForgeError> {
     match cmd {
         ClusterCommand::Create { name } => handle_create(ctx, name, writer),
-        ClusterCommand::Delete { name, force } => handle_delete(ctx, name, *force || non_interactive, writer),
+        ClusterCommand::Delete { name, force } => handle_delete(ctx, name, *force, non_interactive, writer),
         ClusterCommand::List => handle_list(ctx, writer),
         ClusterCommand::Kubeconfig { name, out_file } => handle_kubeconfig(ctx, name, out_file.as_ref(), writer),
         ClusterCommand::LoadImage { name, image } => handle_load_image(ctx, name, image, writer),
@@ -66,23 +66,35 @@ fn handle_create(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> 
 
 /// Handle `cluster delete`.
 ///
-/// On an interactive terminal the delete asks for confirmation first
-/// unless `skip_confirm` (`--force` or `--non-interactive`) is set;
-/// non-TTY invocations never prompt.  A tracked cluster is marked
-/// `Deleting` (and saved) before the delete runs, so a crash
-/// mid-delete leaves a diagnosable record instead of an entry still
-/// claiming `Running`.
+/// The KIND name is derived from the config prefix, so this command can
+/// name a KIND cluster Forge never created. A KIND cluster carries no
+/// Forge ownership label to check the way a network or container does
+/// (`io.x-k8s.kind.cluster` proves only that it is a KIND cluster, not
+/// who created it, and `kind create` offers no hook to attach one), so
+/// Forge state is the ownership record: a cluster absent from state is
+/// refused unless `force` is set, keeping this command from destroying
+/// an unrelated same-named cluster.
+///
+/// On an interactive terminal the delete then asks for confirmation
+/// unless `force` or `non_interactive` is set; non-TTY invocations never
+/// prompt. A tracked cluster is marked `Deleting` (and saved) before the
+/// delete runs, so a crash mid-delete leaves a diagnosable record
+/// instead of an entry still claiming `Running`.
 fn handle_delete(
     ctx: &ForgeContext<'_>,
     name: &str,
-    skip_confirm: bool,
+    force: bool,
+    non_interactive: bool,
     writer: &mut dyn Write,
 ) -> Result<(), ForgeError> {
     let kind_name = cluster_kind_name(ctx, name);
     if ctx.dry_run {
         return report_dry_run(writer, "would delete cluster", name, &kind_name, &ctx.format);
     }
-    if !confirm::confirm_destructive(&format!("delete cluster '{name}'"), skip_confirm)? {
+    if !force && state::find_cluster(&state::load(&ctx.state_dir)?, name).is_none() {
+        return Err(untracked_cluster_error(name, &kind_name));
+    }
+    if !confirm::confirm_destructive(&format!("delete cluster '{name}'"), force || non_interactive)? {
         return confirm::report_declined(writer, &ctx.format);
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
@@ -298,6 +310,18 @@ fn write_kubeconfig(
     }
     output::write_text(writer, kubeconfig)?;
     Ok(())
+}
+
+/// Build the refusal for deleting a cluster Forge does not track.
+///
+/// State is Forge's ownership record for clusters, so a delete targets
+/// only what Forge created or adopted. `--force` overrides for the
+/// recovery case where state was lost but the cluster really is Forge's.
+fn untracked_cluster_error(name: &str, kind_name: &str) -> ForgeError {
+    ForgeError::State(format!(
+        "cluster '{name}' (kind name: {kind_name}) is not tracked in Forge state; \
+         refusing to delete a cluster Forge may not manage (use --force to override)"
+    ))
 }
 
 // ---------------------------------------------------------------
@@ -757,6 +781,99 @@ spec:
         assert!(
             text.contains("created cluster 'hub'"),
             "output should say created: {text}"
+        );
+    }
+
+    #[test]
+    fn delete_refuses_untracked_cluster_without_force() {
+        let dir = test_dir();
+        let config = test_config();
+        let runner = MockRunner::new();
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let mut buf = Vec::new();
+        let result = dispatch(
+            &ctx,
+            &ClusterCommand::Delete {
+                name: "hub".to_owned(),
+                force: false,
+            },
+            false,
+            &mut buf,
+        );
+
+        let err = match result {
+            Ok(()) => std::process::abort(),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not tracked"),
+            "should explain the cluster is untracked: {msg}"
+        );
+        assert!(msg.contains("--force"), "should point at the override: {msg}");
+        assert!(
+            !runner.was_called("kind delete"),
+            "an untracked cluster must not be deleted"
+        );
+    }
+
+    #[test]
+    fn delete_forces_untracked_cluster_when_forced() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind", stdout_ok(""));
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let text = run_dispatch(
+            &ctx,
+            &ClusterCommand::Delete {
+                name: "hub".to_owned(),
+                force: true,
+            },
+        );
+
+        assert!(
+            runner.was_called("kind delete cluster"),
+            "--force must delete an untracked cluster"
+        );
+        assert!(
+            text.contains("deleted cluster 'hub'"),
+            "should report the delete: {text}"
+        );
+    }
+
+    #[test]
+    fn delete_removes_tracked_cluster_without_force() {
+        let dir = test_dir();
+        seed_running_hub(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind", stdout_ok(""));
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let text = run_dispatch(
+            &ctx,
+            &ClusterCommand::Delete {
+                name: "hub".to_owned(),
+                force: false,
+            },
+        );
+
+        assert!(
+            runner.was_called("kind delete cluster"),
+            "a tracked cluster deletes without --force"
+        );
+        assert!(
+            text.contains("deleted cluster 'hub'"),
+            "should report the delete: {text}"
+        );
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(
+            state::find_cluster(&st, "hub").map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Gone),
+            "a deleted tracked cluster must be recorded Gone"
         );
     }
 }
