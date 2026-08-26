@@ -139,7 +139,7 @@ fn write_kubeconfig_file(dir: &Path, content: &str) -> Result<(), ForgeError> {
 
 /// Write kubeconfig content atomically to an arbitrary path, mode 0600.
 ///
-/// Shares the rationale of [`write_kubeconfig_file`]: the content grants
+/// Shares the rationale of `write_kubeconfig_file`: the content grants
 /// cluster-admin, so it must never inherit the process umask. The target
 /// may live in a directory Forge does not own (e.g. a user-supplied
 /// `--out-file`), so only the file mode is enforced, not the directory's.
