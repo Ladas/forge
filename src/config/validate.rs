@@ -191,7 +191,7 @@ fn check_cluster_ports(config: &ForgeConfig) -> Result<(), ForgeError> {
             }
             check_port_bind_address(&pm.bind_address, &ctx)?;
             check_cluster_port_protocol(&pm.protocol, &ctx)?;
-            let key = (pm.host, pm.protocol.to_lowercase());
+            let key = (pm.bind_address.clone(), pm.host, pm.protocol.to_lowercase());
             if !seen.insert(key) {
                 return Err(ForgeError::Validation(format!(
                     "cluster '{}': duplicate host port {} ({})",
@@ -1441,6 +1441,34 @@ mod tests {
         });
         let result = validate(&config);
         assert!(result.is_err(), "duplicate host port should be rejected");
+    }
+
+    #[test]
+    fn cluster_same_host_port_different_bind_address_passes() {
+        let mut config = base_config();
+        config.spec.clusters.push(ClusterSpec {
+            name: "test".to_owned(),
+            nodes: NodeConfig::default(),
+            ports: vec![
+                PortMapping {
+                    bind_address: Some("127.0.0.1".to_owned()),
+                    host: 8080,
+                    container: 30080,
+                    protocol: "tcp".to_owned(),
+                },
+                PortMapping {
+                    bind_address: Some("127.0.0.2".to_owned()),
+                    host: 8080,
+                    container: 30081,
+                    protocol: "tcp".to_owned(),
+                },
+            ],
+            stacks: vec![],
+            properties: BTreeMap::new(),
+        });
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]
