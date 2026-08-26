@@ -38,5 +38,4 @@ jobs:
           key: ${{ runner.os }}-rust-1.96.0-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-1.96.0-msrv-
-          save-always: true
       - run: cargo check --locked --workspace --all-targets --features test-support
