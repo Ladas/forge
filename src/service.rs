@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::{
     cli::ServiceCommand,
-    command::runner::{CommandOutput, CommandRunner, CommandSpec, Redaction, RedactionKind},
+    command::runner::{CommandOutput, CommandRunner, CommandSpec},
     config::{NetworkMode, PortMapping, RestartPolicy, ServiceSpec, VolumeMount},
     context::ForgeContext,
     error::ForgeError,
@@ -309,15 +309,17 @@ fn missing_label(name: &str, key: &str) -> ForgeError {
 /// Build a `docker run` command spec with all configured options.
 fn run_spec(params: &ServiceParams<'_>, service: &ServiceSpec) -> Result<CommandSpec, ForgeError> {
     let mut args = base_run_args(params.container_name, params.env_name, &service.name);
-    let mut redact = Vec::new();
+    let mut env = BTreeMap::new();
     append_network_args(&mut args, &service.network, params.env_name);
     append_port_args(&mut args, &service.ports);
     append_volume_args(&mut args, &service.volumes, params.config_dir, params.state_dir)?;
     append_host_group_arg(&mut args, service.inherit_host_group, params.state_dir)?;
-    append_env_args(&mut args, &mut redact, &service.env);
+    append_env_args(&mut args, &mut env, &service.env);
     append_restart_arg(&mut args, &service.restart);
     append_image_and_cmd(&mut args, &service.image, &service.args);
-    Ok(build_spec_with_redactions(params.binary, args, redact))
+    let mut spec = build_spec(params.binary, args);
+    spec.env = env;
+    Ok(spec)
 }
 
 /// Build the base `run -d --name ... --label ...` argument list.
@@ -403,16 +405,19 @@ fn append_host_group_arg(args: &mut Vec<OsString>, enabled: bool, state_dir: &Pa
     }
 }
 
-/// Append `-e` environment variable arguments.
-fn append_env_args(args: &mut Vec<OsString>, redact: &mut Vec<Redaction>, env: &BTreeMap<String, String>) {
-    for (key, val) in env {
-        let arg = OsString::from(format!("{key}={val}"));
+/// Append value-less `-e KEY` arguments, staging each value in the
+/// spec's process environment.
+///
+/// Values are treated as secrets.  A `-e KEY=VAL` argument would sit
+/// in the runtime CLI's world-readable `/proc/<pid>/cmdline` for as
+/// long as `docker run` executes; the value-less form makes the CLI
+/// read the value from its own environment instead (docker and podman
+/// both support it), so the value never appears on any command line.
+fn append_env_args(args: &mut Vec<OsString>, env: &mut BTreeMap<OsString, OsString>, vars: &BTreeMap<String, String>) {
+    for (key, val) in vars {
         args.push("-e".into());
-        args.push(arg.clone());
-        redact.push(Redaction {
-            kind: RedactionKind::EnvValue,
-            value: arg,
-        });
+        args.push(key.into());
+        env.insert(key.into(), val.into());
     }
 }
 
@@ -496,17 +501,12 @@ pub fn logs_spec(binary: &str, name: &str, tail: Option<u32>) -> CommandSpec {
 
 /// Construct a [`CommandSpec`] from a binary and argument list.
 fn build_spec(binary: &str, args: Vec<OsString>) -> CommandSpec {
-    build_spec_with_redactions(binary, args, Vec::new())
-}
-
-/// Construct a [`CommandSpec`] from a binary, arguments, and redactions.
-fn build_spec_with_redactions(binary: &str, args: Vec<OsString>, redact: Vec<Redaction>) -> CommandSpec {
     CommandSpec {
         program: binary.into(),
         args,
         env: BTreeMap::default(),
         stdin: None,
-        redact,
+        redact: Vec::new(),
     }
 }
 
@@ -1323,18 +1323,21 @@ mod tests {
         let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
         let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
         let display = format!("{spec}");
-        assert!(display.contains("-e"), "should include -e flag: {display}");
         assert!(
-            display.contains("[REDACTED]"),
-            "should redact env var display: {display}"
+            display.contains("-e MY_VAR"),
+            "should pass the variable name: {display}"
         );
+        assert!(!display.contains("my_value"), "should not display env value: {display}");
         assert!(
-            !display.contains("MY_VAR=my_value"),
-            "should not display env value: {display}"
+            !spec.args.iter().any(|arg| arg.to_string_lossy().contains("my_value")),
+            "the secret value must not appear anywhere in argv"
         );
-        assert!(
-            spec.args.iter().any(|arg| arg == "MY_VAR=my_value"),
-            "actual command args should still carry the env assignment"
+        assert_eq!(
+            spec.env
+                .get(std::ffi::OsStr::new("MY_VAR"))
+                .map(|val| val.to_string_lossy()),
+            Some("my_value".into()),
+            "the value should travel via the CLI process environment"
         );
     }
 
