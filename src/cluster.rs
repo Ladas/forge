@@ -175,6 +175,10 @@ fn cluster_kind_name(ctx: &ForgeContext<'_>, name: &str) -> String {
 /// real create, a `Creating` entry is persisted: creation takes
 /// minutes, and a crash mid-create would otherwise leave real KIND
 /// containers with no state record.
+///
+/// The caller must hold the state lock: this saves state, and
+/// [`state::save`] requires the lock against concurrent forge
+/// processes.
 fn create_if_missing(
     ctx: &ForgeContext<'_>,
     kind_name: &str,
@@ -219,6 +223,10 @@ fn upsert_cluster_state(st: &mut state::ForgeState, name: &str, kind_name: &str,
 ///
 /// A cluster with no state entry (deleted purely by its derived KIND
 /// name) is left unrecorded; nothing is saved for it.
+///
+/// The caller must hold the state lock: this saves state, and
+/// [`state::save`] requires the lock against concurrent forge
+/// processes.
 fn set_phase_saved(
     ctx: &ForgeContext<'_>,
     st: &mut state::ForgeState,

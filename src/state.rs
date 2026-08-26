@@ -2,6 +2,9 @@
 //!
 //! State is stored as JSON in `<state_dir>/state.json`.  All writes
 //! are atomic: write to a temporary file, fsync, then rename.
+//! Atomicity protects against crashes, not against concurrent forge
+//! processes — mutating callers must hold the state lock (see
+//! [`lock::acquire`] and the [`save`] docs).
 
 pub mod lock;
 
@@ -277,6 +280,14 @@ pub fn load(state_dir: &Path) -> Result<ForgeState, ForgeError> {
 }
 
 /// Save state atomically: write temp, fsync, rename.
+///
+/// Callers must hold the state lock ([`lock::acquire`]) whenever
+/// another forge process could be running: every save goes through
+/// the single fixed temp path `state.json.tmp`, so two unlocked
+/// concurrent saves interleave their writes and rename torn JSON
+/// into place. This holds transitively — a helper that load-modify-
+/// saves (e.g. `set_phase_saved` in `cluster.rs`) inherits the
+/// requirement even when the lock was taken frames above it.
 ///
 /// # Errors
 ///

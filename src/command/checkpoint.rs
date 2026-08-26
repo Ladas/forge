@@ -8,6 +8,10 @@ use crate::{context::ForgeContext, error::ForgeError, state};
 
 /// Persist the working state, unless this is a dry run.
 ///
+/// The caller must hold the state lock: this saves state, and
+/// [`state::save`] requires the lock against concurrent forge
+/// processes.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the state file cannot be written.
