@@ -99,4 +99,6 @@ jobs:
             ~/.cargo/git
             target
           key: doc-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo doc --locked --no-deps
+      # Match `make doc`: private items carry the same deny-by-default
+      # rustdoc lints, and test-support exposes the pub MockRunner docs.
+      - run: cargo doc --locked --no-deps --document-private-items --features test-support

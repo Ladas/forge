@@ -105,7 +105,7 @@ fmt: check-prereqs-nightly
 	cargo +$(NIGHTLY) fmt --all
 
 doc:
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items --features test-support
 
 audit: check-prereqs-audit
 	cargo audit
