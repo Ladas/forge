@@ -320,7 +320,7 @@ fn start_one_svc(
     }
     let params = build_svc_params(binary, &cname, ctx);
     service::start_service(ctx.runner, &params, svc)?;
-    let health = run_health_check(svc, &cname);
+    let health = run_health_check(svc);
     upsert_svc_state(state, svc, &cname, &health);
     ensure_healthy(svc, &cname, &health)?;
     Ok(ServiceResult {
@@ -364,11 +364,10 @@ fn build_svc_params<'ctx>(
 }
 
 /// Run a health check if configured, return health status.
-fn run_health_check(svc: &crate::config::ServiceSpec, cname: &str) -> ServiceHealth {
+fn run_health_check(svc: &crate::config::ServiceSpec) -> ServiceHealth {
     let Some(check) = &svc.health_check else {
         return ServiceHealth::Unknown;
     };
-    let _ = cname;
     let Some((addr, host_port)) = health_probe_target(svc, check.port) else {
         return ServiceHealth::Unhealthy;
     };
