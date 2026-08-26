@@ -1,26 +1,27 @@
 //! The `plan` command: read-only environment summary.
 //!
-//! Loads the configuration, validates it, and prints what would be
-//! managed without creating or modifying any resources.
+//! Prints what would be managed without creating or modifying any
+//! resources.
 
-use std::{io::Write, path::Path};
+use std::io::Write;
 
 use crate::{
     config,
-    config::validate,
     error::ForgeError,
     output::{self, OutputFormat},
 };
 
 /// Run the `plan` command.
 ///
+/// The configuration is loaded and validated by the caller through
+/// the same path as `up` (including the global `--runtime` override),
+/// so the plan cannot diverge from what `up` would actually do.
+///
 /// # Errors
 ///
 /// Returns [`ForgeError`] if the operation fails.
-pub fn run(config_path: &Path, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
-    let config = config::load(config_path)?;
-    validate::validate(&config)?;
-    render_plan(&config, format, writer)
+pub fn run(config: &config::ForgeConfig, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
+    render_plan(config, format, writer)
 }
 
 /// Render the plan summary.
@@ -97,19 +98,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_validates_config_and_does_not_mutate() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| {
+    fn plan_renders_summary_and_does_not_mutate() {
+        let config: config::ForgeConfig = serde_yaml::from_str(&config::minimal_yaml()).unwrap_or_else(|_| {
             std::process::abort();
             #[expect(unreachable_code, reason = "abort prevents reaching this")]
             {
                 unreachable!()
             }
         });
-        let path = dir.path().join("forge.yaml");
-        std::fs::write(&path, config::minimal_yaml()).unwrap_or_else(|_| std::process::abort());
 
         let mut buf = Vec::new();
-        run(&path, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
+        run(&config, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
 
         let text = String::from_utf8_lossy(&buf);
         assert!(

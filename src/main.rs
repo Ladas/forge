@@ -51,7 +51,8 @@ fn dispatch_doctor(format: &OutputFormat, writer: &mut dyn std::io::Write) -> Re
 
 /// Run the plan command.
 fn dispatch_plan(cli: &Cli, format: &OutputFormat, writer: &mut dyn std::io::Write) -> Result<(), ForgeError> {
-    plan::run(&cli.global.config, format, writer)
+    let config = load_config_validated(cli)?;
+    plan::run(&config, format, writer)
 }
 
 /// Dispatch config subcommands.
