@@ -1,7 +1,9 @@
-//! The `up` command: bring up all configured clusters.
+//! The `up` command: bring up the configured environment.
 //!
-//! Creates any clusters that do not already exist, updates state,
-//! and reports the result.
+//! Ensures the cross-cluster network, creates any clusters that do
+//! not already exist, starts auto-start services, updates state, and
+//! reports the result. Stacks are not applied here; they are managed
+//! by the `stack` subcommands.
 
 use std::io::Write;
 

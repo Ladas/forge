@@ -83,7 +83,7 @@ error.rs       ForgeError (thiserror)
 output.rs      Text and JSON output formatting
 
 command/       Subcommand implementations
-  up.rs        Cluster + service + stack bring-up
+  up.rs        Network + cluster + service bring-up
   down.rs      Teardown in reverse order
   status.rs    Environment status reporting
   doctor.rs    Prerequisite health checks
