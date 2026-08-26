@@ -78,7 +78,10 @@ pub fn tcp_probe(addr: &str, port: u16, timeout: Duration) -> bool {
 /// Block until a TCP health check passes or all retries are exhausted.
 ///
 /// Parses interval and timeout from the [`HealthCheck`] config, then
-/// probes up to `retries` times with a sleep between attempts.
+/// probes up to `retries` times with a sleep between attempts.  No
+/// sleep follows the final failed probe: the verdict is already known,
+/// and with intervals up to 24h a trailing sleep could dominate the
+/// total wait.
 ///
 /// Returns `Ok(true)` if healthy, `Ok(false)` if all retries fail.
 ///
@@ -89,11 +92,13 @@ pub fn tcp_probe(addr: &str, port: u16, timeout: Duration) -> bool {
 pub fn wait_for_healthy(addr: &str, port: u16, check: &HealthCheck) -> Result<bool, ForgeError> {
     let interval = parse_duration(&check.interval)?;
     let timeout = parse_duration(&check.timeout)?;
-    for _ in 0..check.retries {
+    for attempt in 0..check.retries {
         if tcp_probe(addr, port, timeout) {
             return Ok(true);
         }
-        sleep_interval(interval);
+        if attempt.saturating_add(1) < check.retries {
+            sleep_interval(interval);
+        }
     }
     Ok(false)
 }
@@ -160,5 +165,23 @@ mod tests {
     fn tcp_probe_unreachable() {
         let result = tcp_probe("127.0.0.1", 59_999, Duration::from_millis(50));
         assert!(!result, "probe should fail on unreachable port");
+    }
+
+    #[test]
+    fn wait_for_healthy_skips_sleep_after_final_probe() {
+        let check = HealthCheck {
+            check_type: crate::config::HealthCheckType::Tcp,
+            port: 59_999,
+            interval: "60s".to_owned(),
+            timeout: "50ms".to_owned(),
+            retries: 1,
+        };
+        let start = std::time::Instant::now();
+        let healthy = wait_for_healthy("127.0.0.1", 59_999, &check).unwrap_or_else(|_| std::process::abort());
+        assert!(!healthy, "closed port should report unhealthy");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "the verdict is known after the last probe; no interval sleep may follow"
+        );
     }
 }
