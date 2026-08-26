@@ -276,9 +276,14 @@ fn cidr_spec(binary: &str, net_name: &str) -> CommandSpec {
 // ---------------------------------------------------------------
 
 /// Parse JSON labels from `docker network inspect --format` output.
+///
+/// A network created outside Forge can have a nil label map, which
+/// `{{json .Labels}}` prints as the literal `null`.  Both that and an
+/// empty output mean "no labels", so ownership verification can report
+/// the actionable "not managed by Forge" instead of a parse error.
 fn parse_labels(stdout: &str) -> Result<BTreeMap<String, String>, ForgeError> {
     let trimmed = stdout.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed == "null" {
         return Ok(BTreeMap::new());
     }
     serde_json::from_str(trimmed).map_err(|err| ForgeError::State(format!("cannot parse network labels: {err}")))
@@ -641,6 +646,43 @@ mod tests {
             }
         });
         assert!(labels.is_empty(), "empty input should yield empty map");
+    }
+
+    #[test]
+    fn parse_labels_null_literal() {
+        // A nil label map is printed by `{{json .Labels}}` as the literal
+        // `null` for networks created outside Forge.
+        let labels = parse_labels("null\n").unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        });
+        assert!(labels.is_empty(), "null input should yield empty map");
+    }
+
+    #[test]
+    fn remove_reports_null_labels_as_unmanaged() {
+        let mut runner = MockRunner::new();
+        runner.respond("docker network inspect test-net", ok());
+        runner.respond(
+            "docker network inspect test-net --format {{json .Labels}}",
+            CommandOutput {
+                status: 0,
+                stdout: "null\n".to_owned(),
+                stderr: String::new(),
+            },
+        );
+
+        let Err(err) = remove_network(&runner, "docker", "test-net", "test") else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not managed by Forge"),
+            "a nil label map should read as unmanaged, not a parse error: {msg}"
+        );
     }
 
     #[test]

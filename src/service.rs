@@ -676,9 +676,15 @@ fn prepare_writable_volumes(
 }
 
 /// Parse JSON labels from `docker inspect --format` output.
+///
+/// A container created outside Forge can have a nil label map, which
+/// `{{json .Config.Labels}}` prints as the literal `null`.  Both that
+/// and an empty output mean "no labels", so ownership verification can
+/// report the actionable "not managed by Forge" instead of a parse
+/// error.
 fn parse_labels(stdout: &str) -> Result<BTreeMap<String, String>, ForgeError> {
     let trimmed = stdout.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed == "null" {
         return Ok(BTreeMap::new());
     }
     serde_json::from_str(trimmed).map_err(|err| ForgeError::State(format!("cannot parse container labels: {err}")))
@@ -1104,6 +1110,30 @@ mod tests {
         let params = test_params();
         let result = stop_service(&runner, &params);
         assert!(result.is_err(), "should reject unowned container on stop");
+    }
+
+    #[test]
+    fn stop_reports_null_labels_as_unmanaged() {
+        let mut runner = MockRunner::new();
+        runner.respond("docker container inspect test-env-test-svc", ok());
+        runner.respond(
+            "docker container inspect --format {{json .Config.Labels}} test-env-test-svc",
+            CommandOutput {
+                status: 0,
+                stdout: "null\n".to_owned(),
+                stderr: String::new(),
+            },
+        );
+
+        let params = test_params();
+        let Err(err) = stop_service(&runner, &params) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not managed by Forge"),
+            "a nil label map should read as unmanaged, not a parse error: {msg}"
+        );
     }
 
     // ---------------------------------------------------------
