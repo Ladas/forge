@@ -144,7 +144,7 @@ integration tests under `tests/`.
   `test-support` feature
 - Tests use mock `CommandRunner` implementations to
   avoid real KIND/Docker calls
-- The `FakeRunner` records all command invocations
+- The `MockRunner` records all command invocations
   for assertion
 
 ## Key Patterns
