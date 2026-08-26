@@ -167,12 +167,29 @@ fn check_cluster_prefix(config: &ForgeConfig) -> Result<(), ForgeError> {
     Ok(())
 }
 
-/// Each cluster needs at least one control-plane node.
+/// Maximum control-plane nodes per KIND cluster.
+///
+/// KIND is a development tool; the bound keeps an absurd count from
+/// building a huge KIND config before kind itself could refuse it.
+const MAX_CONTROL_PLANES: u32 = 9;
+
+/// Maximum worker nodes per KIND cluster.
+const MAX_WORKERS: u32 = 100;
+
+/// Each cluster needs a bounded, non-zero control-plane count and a
+/// bounded worker count.
 fn check_cluster_nodes(config: &ForgeConfig) -> Result<(), ForgeError> {
     for cluster in &config.spec.clusters {
-        if cluster.nodes.control_planes == 0 {
+        let nodes = &cluster.nodes;
+        if nodes.control_planes == 0 || nodes.control_planes > MAX_CONTROL_PLANES {
             return Err(ForgeError::Validation(format!(
-                "cluster {:?}: controlPlanes must be at least 1",
+                "cluster {:?}: controlPlanes must be 1..={MAX_CONTROL_PLANES}",
+                cluster.name,
+            )));
+        }
+        if nodes.workers > MAX_WORKERS {
+            return Err(ForgeError::Validation(format!(
+                "cluster {:?}: workers must not exceed {MAX_WORKERS}",
                 cluster.name,
             )));
         }
@@ -1288,6 +1305,67 @@ mod tests {
             msg.contains("controlPlanes"),
             "expected control-plane count error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn excessive_control_planes_rejected() {
+        let mut config = base_config();
+        config.spec.clusters = vec![ClusterSpec {
+            name: "big".to_owned(),
+            nodes: NodeConfig {
+                control_planes: 10,
+                workers: 0,
+            },
+            stacks: Vec::new(),
+            properties: BTreeMap::new(),
+        }];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("big") && msg.contains("controlPlanes"),
+            "expected named control-plane bound error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn excessive_workers_rejected() {
+        let mut config = base_config();
+        config.spec.clusters = vec![ClusterSpec {
+            name: "big".to_owned(),
+            nodes: NodeConfig {
+                control_planes: 1,
+                workers: u32::MAX,
+            },
+            stacks: Vec::new(),
+            properties: BTreeMap::new(),
+        }];
+        let Err(err) = validate(&config) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("big") && msg.contains("workers"),
+            "expected named worker bound error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn maximum_node_counts_pass() {
+        let mut config = base_config();
+        config.spec.clusters = vec![ClusterSpec {
+            name: "big".to_owned(),
+            nodes: NodeConfig {
+                control_planes: 9,
+                workers: 100,
+            },
+            stacks: Vec::new(),
+            properties: BTreeMap::new(),
+        }];
+        validate(&config).unwrap_or_else(|_e| {
+            std::process::abort();
+        });
     }
 
     #[test]
