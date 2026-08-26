@@ -35,7 +35,7 @@ pub fn run(ctx: &ForgeContext<'_>, writer: &mut dyn Write) -> Result<(), ForgeEr
 
 /// Status information for one cluster.
 struct StatusEntry {
-    /// Cluster name from config.
+    /// Cluster name from config or state.
     name: String,
     /// KIND cluster name.
     kind_name: String,
@@ -43,16 +43,21 @@ struct StatusEntry {
     state_phase: String,
     /// Whether a live KIND cluster was found.
     live: bool,
+    /// Whether the current config still lists this cluster.
+    in_config: bool,
 }
 
 /// Build status entries from config, state, and live clusters.
 fn build_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]) -> Vec<StatusEntry> {
-    ctx.config
+    let mut entries: Vec<StatusEntry> = ctx
+        .config
         .spec
         .clusters
         .iter()
         .map(|cluster| entry_for_cluster(ctx, st, live, &cluster.name))
-        .collect()
+        .collect();
+    entries.extend(state_only_entries(ctx, st, live));
+    entries
 }
 
 /// Build a status entry for one configured cluster.
@@ -65,7 +70,29 @@ fn entry_for_cluster(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[Str
         kind_name,
         state_phase,
         live: is_live,
+        in_config: true,
     }
+}
+
+/// Build entries for state-tracked clusters absent from the config.
+///
+/// `forge down` deletes every non-Gone cluster recorded in state, so a
+/// cluster removed from the config after it was created must still be
+/// visible here — hiding it would make status omit exactly the
+/// resources the user is most likely to have forgotten about.
+fn state_only_entries(ctx: &ForgeContext<'_>, st: &state::ForgeState, live: &[String]) -> Vec<StatusEntry> {
+    st.clusters
+        .iter()
+        .filter(|cluster| cluster.phase != state::ClusterPhase::Gone)
+        .filter(|cluster| !ctx.config.spec.clusters.iter().any(|spec| spec.name == cluster.name))
+        .map(|cluster| StatusEntry {
+            name: cluster.name.clone(),
+            kind_name: cluster.kind_name.clone(),
+            state_phase: format!("{:?}", cluster.phase).to_lowercase(),
+            live: live.contains(&cluster.kind_name),
+            in_config: false,
+        })
+        .collect()
 }
 
 /// Get the state phase label for a cluster, or "unknown".
@@ -198,6 +225,7 @@ fn entry_to_json(entry: &StatusEntry) -> serde_json::Value {
         "kindName": entry.kind_name,
         "statePhase": entry.state_phase,
         "live": entry.live,
+        "inConfig": entry.in_config,
     })
 }
 
@@ -236,9 +264,10 @@ fn format_svc_text(svc: &SvcEntry) -> String {
 /// Format one entry as a text line.
 fn format_entry_text(entry: &StatusEntry) -> String {
     let live_label = if entry.live { "live" } else { "not found" };
+    let config_label = if entry.in_config { "" } else { ", not in config" };
     format!(
-        "  {}: state={}, kind={} ({})",
-        entry.name, entry.state_phase, entry.kind_name, live_label
+        "  {}: state={}, kind={} ({}{})",
+        entry.name, entry.state_phase, entry.kind_name, live_label, config_label
     )
 }
 
@@ -356,6 +385,51 @@ spec:
         let text = run_status(&ctx);
         assert!(text.contains("unknown"), "should show unknown state: {text}");
         assert!(text.contains("not found"), "should show not found: {text}");
+    }
+
+    /// Seed state with a running cluster the config does not list.
+    fn seed_state_only_spoke(state_dir: &std::path::Path) {
+        let mut st = state::empty();
+        st.clusters.push(ClusterState {
+            name: "spoke".to_owned(),
+            kind_name: "forge-spoke".to_owned(),
+            context: "kind-forge-spoke".to_owned(),
+            phase: ClusterPhase::Running,
+        });
+        state::save(state_dir, &st).unwrap_or_else(|_| std::process::abort());
+    }
+
+    #[test]
+    fn status_lists_state_tracked_cluster_missing_from_config() {
+        let dir = test_dir();
+        // State tracks a cluster the config no longer lists; down would
+        // still delete it, so status must show it.
+        seed_state_only_spoke(dir.path());
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kind get clusters",
+            CommandOutput {
+                status: 0,
+                stdout: "forge-spoke\n".to_owned(),
+                stderr: String::new(),
+            },
+        );
+        let ctx = ForgeContext {
+            runner: &runner,
+            config: &config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+
+        let text = run_status(&ctx);
+
+        assert!(
+            text.contains("spoke: state=running, kind=forge-spoke (live, not in config)"),
+            "the state-only cluster must be listed and flagged: {text}"
+        );
     }
 
     /// Seed state with a running hub cluster and active network.
