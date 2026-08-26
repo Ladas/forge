@@ -46,9 +46,13 @@ fn handle_create(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> 
     }
     let _lock = lock::acquire(&ctx.state_dir)?;
     let mut state = state::load(&ctx.state_dir)?;
-    create_if_missing(ctx, &kind_name, &cluster.nodes, &mut state, name)?;
+    let created = create_if_missing(ctx, &kind_name, &cluster.nodes, &mut state, name)?;
     state::save(&ctx.state_dir, &state)?;
-    report_created(writer, name, &kind_name, &ctx.format)
+    if created {
+        report_created(writer, name, &kind_name, &ctx.format)
+    } else {
+        report_exists(writer, name, &kind_name, &ctx.format)
+    }
 }
 
 /// Handle `cluster delete`.
@@ -131,20 +135,24 @@ fn cluster_kind_name(ctx: &ForgeContext<'_>, name: &str) -> String {
     kind_ops::kind_cluster_name(&ctx.config.spec.runtime.cluster_prefix, name)
 }
 
-/// Create a cluster if it doesn't already exist.
+/// Create a cluster if it doesn't already exist. Returns true if created.
+///
+/// A cluster that already exists in KIND is adopted into state as
+/// `Running` so bulk teardown (`forge down`) still tracks it.
 fn create_if_missing(
     ctx: &ForgeContext<'_>,
     kind_name: &str,
     nodes: &crate::config::NodeConfig,
     st: &mut state::ForgeState,
     name: &str,
-) -> Result<(), ForgeError> {
+) -> Result<bool, ForgeError> {
     if kind_ops::cluster_exists(ctx.runner, kind_name)? {
-        return Ok(());
+        upsert_cluster_state(st, name, kind_name, ClusterPhase::Running);
+        return Ok(false);
     }
     kind_ops::create_cluster(ctx.runner, kind_name, nodes, &ctx.state_dir, None)?;
     upsert_cluster_state(st, name, kind_name, ClusterPhase::Running);
-    Ok(())
+    Ok(true)
 }
 
 /// Insert or update a cluster's state entry.
@@ -212,6 +220,12 @@ fn report_created(
     report_text_or_json(writer, &msg, format)
 }
 
+/// Report a cluster that already existed and was adopted into state.
+fn report_exists(writer: &mut dyn Write, name: &str, kind_name: &str, format: &OutputFormat) -> Result<(), ForgeError> {
+    let msg = format!("cluster '{name}' already exists (kind name: {kind_name})");
+    report_text_or_json(writer, &msg, format)
+}
+
 /// Report a deleted cluster.
 fn report_deleted(
     writer: &mut dyn Write,
@@ -262,4 +276,118 @@ fn report_text_or_json(writer: &mut dyn Write, message: &str, format: &OutputFor
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::runner::{CommandOutput, MockRunner};
+
+    /// Build a minimal `ForgeConfig` with one cluster named `hub`.
+    fn test_config() -> crate::config::ForgeConfig {
+        let yaml = "\
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: test
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: forge
+  clusters:
+    - name: hub
+  services: []
+  stacks: {}
+";
+        serde_yaml::from_str(yaml).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    /// Create a temp dir for test state.
+    fn test_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    /// Build a context over the given runner, config, and state dir.
+    fn test_ctx<'env>(
+        runner: &'env MockRunner,
+        config: &'env crate::config::ForgeConfig,
+        dir: &tempfile::TempDir,
+    ) -> ForgeContext<'env> {
+        ForgeContext {
+            runner,
+            config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        }
+    }
+
+    /// Build a successful command output with the given stdout.
+    fn stdout_ok(stdout: &str) -> CommandOutput {
+        CommandOutput {
+            status: 0,
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+        }
+    }
+
+    /// Dispatch a command and return the captured output text.
+    fn run_dispatch(ctx: &ForgeContext<'_>, cmd: &ClusterCommand) -> String {
+        let mut buf = Vec::new();
+        dispatch(ctx, cmd, &mut buf).unwrap_or_else(|_| std::process::abort());
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[test]
+    fn create_adopts_existing_cluster_into_state() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind get clusters", stdout_ok("forge-hub\n"));
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let text = run_dispatch(&ctx, &ClusterCommand::Create { name: "hub".to_owned() });
+
+        assert!(!runner.was_called("kind create"), "should not call kind create");
+        assert!(text.contains("already exists"), "output should note existing: {text}");
+        let st = state::load(dir.path()).unwrap_or_else(|_| std::process::abort());
+        let cluster = state::find_cluster(&st, "hub");
+        assert!(cluster.is_some(), "existing cluster should be adopted into state");
+        assert_eq!(
+            cluster.map(|cs| cs.phase.clone()),
+            Some(ClusterPhase::Running),
+            "adopted cluster should be Running"
+        );
+    }
+
+    #[test]
+    fn create_reports_created_for_new_cluster() {
+        let dir = test_dir();
+        let config = test_config();
+        let mut runner = MockRunner::new();
+        runner.respond("kind get clusters", stdout_ok(""));
+        runner.respond("kind", stdout_ok(""));
+        let ctx = test_ctx(&runner, &config, &dir);
+
+        let text = run_dispatch(&ctx, &ClusterCommand::Create { name: "hub".to_owned() });
+
+        assert!(runner.was_called("kind create cluster"), "should call kind create");
+        assert!(
+            text.contains("created cluster 'hub'"),
+            "output should say created: {text}"
+        );
+    }
 }
