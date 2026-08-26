@@ -59,12 +59,49 @@ struct ToolStatus {
 
 /// Run the `doctor` command.
 ///
+/// Renders the probe results, then fails when any required tool is
+/// missing or no container runtime (docker or podman) was found, so
+/// scripts and CI gates can rely on the exit code.
+///
 /// # Errors
 ///
-/// Returns [`ForgeError`] if the operation fails.
+/// Returns [`ForgeError::Doctor`] naming the missing tools, or
+/// another [`ForgeError`] if rendering fails.
 pub fn run(runner: &dyn CommandRunner, format: &OutputFormat, writer: &mut dyn Write) -> Result<(), ForgeError> {
     let results = probe_tools(runner);
-    render_results(&results, format, writer)
+    render_results(&results, format, writer)?;
+    ensure_healthy(&results)
+}
+
+/// Return an error naming the missing required tools, if any.
+fn ensure_healthy(results: &[ToolStatus]) -> Result<(), ForgeError> {
+    let missing = missing_tools(results);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(ForgeError::Doctor(format!(
+        "missing required tools: {}",
+        missing.join(", ")
+    )))
+}
+
+/// Names of missing required tools, including the runtime group.
+///
+/// `docker` and `podman` are individually optional, but at least one
+/// container runtime must be present for Forge to operate.
+fn missing_tools(results: &[ToolStatus]) -> Vec<String> {
+    let mut missing: Vec<String> = results
+        .iter()
+        .filter(|tool| tool.required && !tool.found)
+        .map(|tool| tool.name.clone())
+        .collect();
+    let has_runtime = results
+        .iter()
+        .any(|tool| tool.found && (tool.name == "docker" || tool.name == "podman"));
+    if !has_runtime {
+        missing.push("docker or podman".to_owned());
+    }
+    missing
 }
 
 /// Probe all tools and collect results.
@@ -121,9 +158,17 @@ fn render_results(results: &[ToolStatus], format: &OutputFormat, writer: &mut dy
 }
 
 /// Render results as JSON.
+///
+/// The payload carries an overall `healthy` flag, and the envelope
+/// status is `Error` when required tools are missing so downstream
+/// parsers see the failure without inspecting individual tools.
 fn render_json(results: &[ToolStatus], writer: &mut dyn Write) -> Result<(), ForgeError> {
-    let result = output::success(serde_json::json!({ "tools": results }));
-    output::write_json(writer, &result)?;
+    let healthy = missing_tools(results).is_empty();
+    let mut envelope = output::success(serde_json::json!({ "tools": results, "healthy": healthy }));
+    if !healthy {
+        envelope.status = "Error";
+    }
+    output::write_json(writer, &envelope)?;
     Ok(())
 }
 
@@ -147,17 +192,38 @@ mod tests {
     use super::*;
     use crate::command::runner::MockRunner;
 
-    /// Build a mock runner with kubectl and kind present.
-    fn mock_with_tools() -> MockRunner {
-        let mut runner = MockRunner::new();
-        let ok = CommandOutput {
+    /// A successful `which` response.
+    fn which_ok() -> CommandOutput {
+        CommandOutput {
             status: 0,
-            stdout: "/usr/bin/kubectl\n".to_owned(),
+            stdout: "/usr/bin/tool\n".to_owned(),
             stderr: String::new(),
-        };
-        runner.respond("which kubectl", ok.clone());
-        runner.respond("which kind", ok);
+        }
+    }
+
+    /// Build a mock runner where the given tools are on `PATH`.
+    fn mock_with(tools: &[&str]) -> MockRunner {
+        let mut runner = MockRunner::new();
+        for tool in tools {
+            runner.respond(&format!("which {tool}"), which_ok());
+        }
         runner
+    }
+
+    /// Build a mock runner with a healthy tool set.
+    fn mock_with_tools() -> MockRunner {
+        mock_with(&["kubectl", "kind", "docker"])
+    }
+
+    /// Parse a JSON buffer, aborting on failure.
+    fn parse_json(buf: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(buf).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                serde_json::Value::Null
+            }
+        })
     }
 
     #[test]
@@ -167,7 +233,7 @@ mod tests {
         run(&runner, &OutputFormat::Text, &mut buf).unwrap_or_else(|_| std::process::abort());
         let text = String::from_utf8_lossy(&buf);
         assert!(text.contains("ok: kubectl"), "kubectl should be found: {text}");
-        assert!(text.contains("MISSING: docker"), "docker should be missing: {text}");
+        assert!(text.contains("MISSING: podman"), "podman should be missing: {text}");
     }
 
     #[test]
@@ -175,14 +241,7 @@ mod tests {
         let runner = mock_with_tools();
         let mut buf = Vec::new();
         run(&runner, &OutputFormat::Json, &mut buf).unwrap_or_else(|_| std::process::abort());
-        let text = String::from_utf8_lossy(&buf);
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| {
-            std::process::abort();
-            #[expect(unreachable_code, reason = "abort prevents reaching this")]
-            {
-                serde_json::Value::Null
-            }
-        });
+        let parsed = parse_json(&buf);
         assert!(
             parsed
                 .get("data")
@@ -190,6 +249,65 @@ mod tests {
                 .and_then(|tools| tools.as_array())
                 .is_some(),
             "should have data.tools array"
+        );
+        assert_eq!(
+            parsed.get("data").and_then(|data| data.get("healthy")),
+            Some(&serde_json::Value::Bool(true)),
+            "a healthy tool set should report healthy: true"
+        );
+        assert_eq!(
+            parsed.get("status").and_then(serde_json::Value::as_str),
+            Some("Success"),
+            "a healthy tool set should report status Success"
+        );
+    }
+
+    #[test]
+    fn doctor_fails_when_required_tool_missing() {
+        let runner = mock_with(&["kubectl", "docker"]);
+        let mut buf = Vec::new();
+        let Err(err) = run(&runner, &OutputFormat::Text, &mut buf) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("kind"), "error should name the missing tool: {msg}");
+        let text = String::from_utf8_lossy(&buf);
+        assert!(
+            text.contains("MISSING: kind (required)"),
+            "report should still render: {text}"
+        );
+    }
+
+    #[test]
+    fn doctor_fails_without_container_runtime() {
+        let runner = mock_with(&["kubectl", "kind"]);
+        let mut buf = Vec::new();
+        let Err(err) = run(&runner, &OutputFormat::Text, &mut buf) else {
+            std::process::abort();
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("docker or podman"),
+            "error should name the runtime group: {msg}"
+        );
+    }
+
+    #[test]
+    fn doctor_json_reports_unhealthy_as_error() {
+        let runner = mock_with(&["docker"]);
+        let mut buf = Vec::new();
+        let result = run(&runner, &OutputFormat::Json, &mut buf);
+        assert!(result.is_err(), "missing required tools must fail the run");
+        let parsed = parse_json(&buf);
+        assert_eq!(
+            parsed.get("data").and_then(|data| data.get("healthy")),
+            Some(&serde_json::Value::Bool(false)),
+            "missing required tools should report healthy: false"
+        );
+        assert_eq!(
+            parsed.get("status").and_then(serde_json::Value::as_str),
+            Some("Error"),
+            "missing required tools should report status Error"
         );
     }
 }

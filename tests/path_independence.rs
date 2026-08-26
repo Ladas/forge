@@ -230,11 +230,31 @@ fn doctor_runs_from_foreign_directory() {
         .current_dir(std::env::temp_dir())
         .output()
         .unwrap_or_else(|_| std::process::abort());
-    assert!(
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Doctor must render its full report regardless of the working
+    // directory (and regardless of which tools this runner has).
+    for tool in ["docker", "podman", "kind", "kubectl", "helm"] {
+        assert!(stdout.contains(tool), "doctor should report {tool}: {stdout}");
+    }
+    // Exit-code contract: doctor fails exactly when a required tool
+    // is missing or no container runtime (docker/podman) was found.
+    assert_eq!(
         output.status.success(),
-        "doctor should succeed from foreign directory: {}",
-        String::from_utf8_lossy(&output.stderr)
+        doctor_report_is_healthy(&stdout),
+        "doctor exit code must match its report: {stdout}"
     );
+}
+
+/// Derive doctor's health verdict from its text report.
+fn doctor_report_is_healthy(stdout: &str) -> bool {
+    let missing_required = stdout
+        .lines()
+        .any(|line| line.contains("MISSING") && line.contains("(required)"));
+    let runtime_found = stdout.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("ok: docker") || trimmed.starts_with("ok: podman")
+    });
+    !missing_required && runtime_found
 }
 
 #[test]

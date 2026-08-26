@@ -28,6 +28,10 @@ pub enum ForgeError {
         message: String,
     },
 
+    /// A `doctor` health check found missing required tools.
+    #[error("doctor: {0}")]
+    Doctor(String),
+
     /// State file could not be read, written, or is corrupt.
     #[error("state error: {0}")]
     State(String),
