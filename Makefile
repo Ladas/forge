@@ -24,7 +24,7 @@ endif
 # All
 # -------------------------------------------------------------------
 
-all: build fmt lint lint-extra test audit
+all: build lint lint-extra test audit
 
 # -------------------------------------------------------------------
 # Build
