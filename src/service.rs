@@ -803,6 +803,12 @@ fn handle_stop(ctx: &ForgeContext<'_>, name: &str, writer: &mut dyn Write) -> Re
 }
 
 /// Handle `service logs`.
+///
+/// Verifies ownership before fetching logs, matching start/stop: the
+/// hyphen-joined container name is ambiguous across environments (env
+/// `a` + service `b-c` and env `a-b` + service `c` both name `a-b-c`),
+/// so an unverified lookup could silently stream another environment's
+/// container.
 fn handle_logs(
     ctx: &ForgeContext<'_>,
     name: &str,
@@ -812,6 +818,7 @@ fn handle_logs(
     lookup_service(ctx, name)?;
     let rt = crate::runtime::resolve(ctx.runner, &ctx.config.spec.runtime.provider)?;
     let cname = container_name(&ctx.config.metadata.name, name);
+    verify_ownership(ctx.runner, &rt.binary, &cname, &ctx.config.metadata.name)?;
     let spec = logs_spec(&rt.binary, &cname, tail);
     let output = ctx.runner.run(&spec)?;
     if output.status != 0 {
@@ -1794,5 +1801,93 @@ mod tests {
         let spec = logs_spec("docker", "my-svc", Some(50));
         let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert_eq!(args.as_slice(), &["logs", "--tail", "50", "my-svc"], "argv with --tail");
+    }
+
+    // ---------------------------------------------------------
+    // handle_logs ownership tests
+    // ---------------------------------------------------------
+
+    /// Parse a minimal config with one service for dispatch tests.
+    fn logs_test_config() -> crate::config::ForgeConfig {
+        let yaml = "\
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+metadata:
+  name: test
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: forge
+  clusters:
+    - name: hub
+  services:
+    - name: svc
+      image: nginx:latest
+  stacks: {}
+";
+        serde_yaml::from_str(yaml).unwrap_or_else(|_| {
+            std::process::abort();
+            #[expect(unreachable_code, reason = "abort prevents reaching this")]
+            {
+                unreachable!()
+            }
+        })
+    }
+
+    /// Run `service logs svc` against a mock runner, returning the result
+    /// and captured output.
+    fn run_logs(runner: &MockRunner, config: &crate::config::ForgeConfig) -> (Result<(), ForgeError>, String) {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let ctx = ForgeContext {
+            runner,
+            config,
+            state_dir: dir.path().to_path_buf(),
+            config_dir: dir.path().to_path_buf(),
+            format: OutputFormat::Text,
+            dry_run: false,
+        };
+        let mut buf = Vec::new();
+        let result = handle_logs(&ctx, "svc", None, &mut buf);
+        (result, String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    #[test]
+    fn logs_refuses_unowned_container() {
+        let mut runner = MockRunner::new();
+        runner.respond("docker", ok());
+        runner.respond(
+            "docker container inspect --format {{json .Config.Labels}} test-svc",
+            foreign_labels(),
+        );
+
+        let config = logs_test_config();
+        let (result, _output) = run_logs(&runner, &config);
+
+        assert!(result.is_err(), "should refuse logs from an unowned container");
+        assert!(!runner.was_called("logs"), "must not fetch unowned container logs");
+    }
+
+    #[test]
+    fn logs_streams_owned_container() {
+        let mut runner = MockRunner::new();
+        runner.respond("docker", ok());
+        runner.respond(
+            "docker container inspect --format {{json .Config.Labels}} test-svc",
+            owned_labels("test"),
+        );
+        runner.respond(
+            "docker logs test-svc",
+            CommandOutput {
+                status: 0,
+                stdout: "hello\n".to_owned(),
+                stderr: String::new(),
+            },
+        );
+
+        let config = logs_test_config();
+        let (result, output) = run_logs(&runner, &config);
+
+        assert!(result.is_ok(), "owned container logs should stream: {result:?}");
+        assert!(output.contains("hello"), "should write the log stream: {output}");
     }
 }
