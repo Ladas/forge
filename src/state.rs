@@ -262,14 +262,18 @@ pub fn empty() -> ForgeState {
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError::State`] if the file exists but cannot be
-/// read or parsed.
+/// Returns [`ForgeError::State`] if the file cannot be read for any
+/// reason other than not existing, or cannot be parsed. Only a true
+/// `NotFound` maps to an empty state: a `Path::exists()` pre-check
+/// would also swallow permission errors, symlink loops, and dangling
+/// symlinks as "fresh environment" — and race the file's presence.
 pub fn load(state_dir: &Path) -> Result<ForgeState, ForgeError> {
     let path = state_path(state_dir);
-    if !path.exists() {
-        return Ok(empty());
+    match std::fs::read_to_string(&path) {
+        Ok(content) => parse_state(&content, &path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(empty()),
+        Err(err) => Err(ForgeError::State(format!("cannot read {}: {err}", path.display()))),
     }
-    read_state(&path)
 }
 
 /// Save state atomically: write temp, fsync, rename.
@@ -392,12 +396,10 @@ fn state_path(state_dir: &Path) -> PathBuf {
     state_dir.join(STATE_FILE)
 }
 
-/// Read and parse the state file.
-fn read_state(path: &Path) -> Result<ForgeState, ForgeError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| ForgeError::State(format!("cannot read {}: {err}", path.display())))?;
-    check_api_version(&content, path)?;
-    serde_json::from_str(&content)
+/// Parse state file content, checking the schema version first.
+fn parse_state(content: &str, path: &Path) -> Result<ForgeState, ForgeError> {
+    check_api_version(content, path)?;
+    serde_json::from_str(content)
         .map_err(|err| ForgeError::State(format!("corrupt state file {}: {err}", path.display())))
 }
 
@@ -584,6 +586,21 @@ mod tests {
             }
         });
         assert!(state.clusters.is_empty(), "missing file should yield empty state");
+    }
+
+    #[test]
+    fn load_symlink_loop_is_an_error_not_empty() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| std::process::abort());
+        let path = dir.path().join(STATE_FILE);
+        // A self-referential symlink: stat fails with ELOOP, so the old
+        // Path::exists() gate read this as "no state" and returned a
+        // fresh environment instead of an error.
+        std::os::unix::fs::symlink(&path, &path).unwrap_or_else(|_| std::process::abort());
+        let err = load(dir.path()).err().unwrap_or_else(|| std::process::abort());
+        assert!(
+            err.to_string().contains("cannot read"),
+            "an unreadable state file must not read as a fresh environment: {err}"
+        );
     }
 
     #[test]
