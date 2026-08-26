@@ -525,9 +525,14 @@ fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
 }
 
 /// Format a [`PortMapping`] as `[bind:]host:container/proto`.
+///
+/// An IPv6 bind address is wrapped in brackets: validation accepts any
+/// [`std::net::IpAddr`], and the runtime rejects a bare `::1:8080:80`
+/// because the colons are indistinguishable from field separators.
 fn format_port_mapping(port: &PortMapping) -> String {
     let base = format!("{}:{}/{}", port.host, port.container, port.protocol);
     match &port.bind_address {
+        Some(addr) if addr.parse::<std::net::Ipv6Addr>().is_ok() => format!("[{addr}]:{base}"),
         Some(addr) => format!("{addr}:{base}"),
         None => base,
     }
@@ -1266,6 +1271,24 @@ mod tests {
         assert!(
             display.contains("127.0.0.1:8080:80/tcp"),
             "should include port mapping: {display}"
+        );
+    }
+
+    #[test]
+    fn run_spec_ports_bracket_ipv6_bind_address() {
+        let mut svc = minimal_service();
+        svc.ports.push(PortMapping {
+            bind_address: Some("::1".to_owned()),
+            host: 8080,
+            container: 80,
+            protocol: "tcp".to_owned(),
+        });
+        let params = spec_params("env-svc", "env", Path::new("/tmp"), Path::new("/tmp/.forge"));
+        let spec = run_spec(&params, &svc).unwrap_or_else(|_| std::process::abort());
+        let display = format!("{spec}");
+        assert!(
+            display.contains("[::1]:8080:80/tcp"),
+            "IPv6 bind address must be bracketed: {display}"
         );
     }
 
