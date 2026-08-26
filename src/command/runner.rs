@@ -173,10 +173,32 @@ fn join_stdin_writer(writer: Option<StdinWriter>) -> std::io::Result<()> {
 /// Convert a process output reference into a [`CommandOutput`].
 fn into_command_output(output: &std::process::Output) -> CommandOutput {
     CommandOutput {
-        status: output.status.code().unwrap_or(-1),
+        status: status_code(output.status),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
+}
+
+/// Map an exit status to a numeric code.
+///
+/// A child killed by a signal has no exit code; following shell
+/// convention it is reported as 128 + the signal number so error
+/// messages name the real termination cause instead of a fake `-1`.
+fn status_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or_else(|| signal_status_code(status))
+}
+
+/// Fold a fatal signal into a shell-convention exit code (Unix).
+#[cfg(unix)]
+fn signal_status_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal().map_or(-1, |sig| 128_i32.saturating_add(sig))
+}
+
+/// Non-Unix platforms have no signals to report.
+#[cfg(not(unix))]
+fn signal_status_code(_status: std::process::ExitStatus) -> i32 {
+    -1
 }
 
 /// Build a [`ForgeError::Command`] from a spec and IO error.
@@ -467,6 +489,22 @@ mod tests {
 
         assert_eq!(output.status, 23);
         assert_eq!(output.stderr, "primary failure");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_reports_signal_termination_as_128_plus_signal() {
+        let spec = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "kill -TERM $$".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            redact: Vec::new(),
+        };
+
+        let output = SystemRunner.run(&spec).unwrap_or_else(|_| std::process::abort());
+
+        assert_eq!(output.status, 143, "SIGTERM (15) should report as 128 + 15");
     }
 
     #[test]
