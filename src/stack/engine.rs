@@ -121,8 +121,8 @@ pub fn apply_stack(
 ) -> Result<StackResult, ForgeError> {
     let mut sc = build_step_context(ctx, cluster, network)?;
     precompute_pool_if_needed(ctx.runner, &mut sc)?;
-    let tpl = build_template_context(cluster, stack_name, network, sc.cluster_pool.as_deref(), captures);
-    let count = execute_steps(ctx.runner, &stack.steps, &tpl, &mut sc)?;
+    let mut tpl = build_template_context(cluster, stack_name, network, sc.cluster_pool.as_deref(), captures);
+    let count = execute_steps(ctx.runner, &stack.steps, &mut tpl, &mut sc)?;
     Ok(StackResult {
         name: stack_name.to_owned(),
         cluster: cluster.name.clone(),
@@ -217,15 +217,36 @@ fn precompute_pool_if_needed(runner: &dyn CommandRunner, sc: &mut StepContext) -
 fn execute_steps(
     runner: &dyn CommandRunner,
     steps: &[StepSpec],
-    tpl: &TemplateContext,
+    tpl: &mut TemplateContext,
     sc: &mut StepContext,
 ) -> Result<usize, ForgeError> {
     let mut count: usize = 0;
     for step in steps {
+        sync_pending_captures(tpl, sc);
         let rendered = render_step(step, tpl)?;
         count = count.saturating_add(execute_step(runner, &rendered, tpl, sc)?);
     }
     Ok(count)
+}
+
+/// Make captures recorded by earlier steps visible to later steps.
+///
+/// Capture steps write their value into `sc.pending_captures`, a flat
+/// key to value map for the cluster currently being applied. Copying those
+/// entries into `tpl.captures` under this cluster's name lets a later step
+/// in the same stack resolve `{{ captures.<cluster>.<key> }}`, matching the
+/// cross-stack behavior that already flows through persisted state. Both
+/// collections are ordered [`BTreeMap`]s, so the merge and any subsequent
+/// rendering stay deterministic.
+fn sync_pending_captures(tpl: &mut TemplateContext, sc: &StepContext) {
+    if sc.pending_captures.is_empty() {
+        return;
+    }
+    let cluster = tpl.cluster_name.clone();
+    let entry = tpl.captures.entry(cluster).or_default();
+    for (key, value) in &sc.pending_captures {
+        entry.insert(key.clone(), value.clone());
+    }
 }
 
 /// Execute a single rendered step, returning leaf step count.
@@ -586,7 +607,7 @@ fn execute_foreach(
     for element in &arr {
         let mut child_tpl = tpl.clone();
         child_tpl.item = Some(element.clone());
-        total = total.saturating_add(execute_steps(runner, sub_steps, &child_tpl, sc)?);
+        total = total.saturating_add(execute_steps(runner, sub_steps, &mut child_tpl, sc)?);
     }
     Ok(total)
 }
@@ -1120,7 +1141,7 @@ mod tests {
         let mut runner = MockRunner::new();
         runner.respond("kubectl", ok_output());
         let mut sc = make_step_context();
-        let tpl = make_template_context();
+        let mut tpl = make_template_context();
         let steps = vec![
             StepSpec::Manifest {
                 path: "a.yaml".to_owned(),
@@ -1129,7 +1150,7 @@ mod tests {
                 path: "b.yaml".to_owned(),
             },
         ];
-        let count = execute_steps(&runner, &steps, &tpl, &mut sc).unwrap_or_else(|_| std::process::abort());
+        let count = execute_steps(&runner, &steps, &mut tpl, &mut sc).unwrap_or_else(|_| std::process::abort());
         assert_eq!(count, 2, "should execute both steps");
         assert_eq!(runner.call_count(), 2, "should record 2 calls");
     }
@@ -1147,7 +1168,7 @@ mod tests {
             },
         );
         let mut sc = make_step_context();
-        let tpl = make_template_context();
+        let mut tpl = make_template_context();
         let steps = vec![
             StepSpec::Manifest {
                 path: "a.yaml".to_owned(),
@@ -1159,7 +1180,7 @@ mod tests {
                 path: "c.yaml".to_owned(),
             },
         ];
-        let result = execute_steps(&runner, &steps, &tpl, &mut sc);
+        let result = execute_steps(&runner, &steps, &mut tpl, &mut sc);
         assert!(result.is_err(), "should fail on second step");
         assert_eq!(runner.call_count(), 2, "should only run 2 steps");
     }
@@ -1178,7 +1199,7 @@ mod tests {
                 path: "{{ item }}.yaml".to_owned(),
             }],
         }];
-        let count = execute_steps(&runner, &steps, &tpl, &mut sc).unwrap_or_else(|_| std::process::abort());
+        let count = execute_steps(&runner, &steps, &mut tpl, &mut sc).unwrap_or_else(|_| std::process::abort());
         assert_eq!(count, 2, "should execute 2 iterations");
         let calls = runner.calls();
         let call_strs: Vec<String> = calls.iter().map(ToString::to_string).collect();
@@ -1208,7 +1229,7 @@ mod tests {
                 path: "{{ item }}.yaml".to_owned(),
             }],
         }];
-        let result = execute_steps(&runner, &steps, &tpl, &mut sc);
+        let result = execute_steps(&runner, &steps, &mut tpl, &mut sc);
         assert!(result.is_err(), "oversized for-each should fail");
         assert_eq!(runner.call_count(), 0, "must fail before kubectl");
     }
@@ -1237,7 +1258,7 @@ mod tests {
     #[test]
     fn rendered_path_escape_is_rejected() {
         let mut sc = make_step_context();
-        let tpl = TemplateContext {
+        let mut tpl = TemplateContext {
             cluster_name: "hub".to_owned(),
             stack_name: "base".to_owned(),
             properties: BTreeMap::from([("path".to_owned(), serde_json::json!("../escape.yaml"))]),
@@ -1249,7 +1270,7 @@ mod tests {
             path: "{{ cluster.properties.path }}".to_owned(),
         }];
         let runner = MockRunner::new();
-        let result = execute_steps(&runner, &steps, &tpl, &mut sc);
+        let result = execute_steps(&runner, &steps, &mut tpl, &mut sc);
         assert!(result.is_err(), "rendered path escape must fail");
         assert_eq!(runner.call_count(), 0, "must fail before kubectl");
     }
@@ -1714,6 +1735,37 @@ mod tests {
         );
         assert!(runner.call_count() > 1, "non-zero kubectl exit must be retried");
         assert!(sc.pending_captures.is_empty(), "should not store a value on failure");
+    }
+
+    #[test]
+    fn capture_is_visible_to_later_step_in_same_stack() {
+        let mut runner = MockRunner::new();
+        runner.respond(
+            "kubectl",
+            CommandOutput {
+                status: 0,
+                stdout: "172.18.255.200".to_owned(),
+                stderr: String::new(),
+            },
+        );
+        let mut sc = make_step_context();
+        let mut tpl = make_template_context();
+        let steps = vec![
+            StepSpec::Capture {
+                resource: "svc/gateway".to_owned(),
+                namespace: Some("grid-system".to_owned()),
+                jsonpath: "{.spec.clusterIP}".to_owned(),
+                key: "gw-ip".to_owned(),
+                timeout: "1s".to_owned(),
+                interval: "1ms".to_owned(),
+            },
+            StepSpec::Manifest {
+                path: "{{ captures.hub.gw-ip }}.yaml".to_owned(),
+            },
+        ];
+        let count = execute_steps(&runner, &steps, &mut tpl, &mut sc).unwrap_or_else(|_| std::process::abort());
+        assert_eq!(count, 2, "both steps should execute");
+        assert!(runner.was_called("172.18.255.200.yaml"), "capture rendered");
     }
 
     #[test]
