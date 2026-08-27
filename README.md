@@ -1,7 +1,6 @@
 # Praxis Forge
 
-Declarative development-environment orchestrator for KIND clusters, container
-services, and deployment stacks.
+Development environment orchestration tool for Praxis development and testing.
 
 ## Summary
 
