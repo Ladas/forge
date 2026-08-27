@@ -33,11 +33,11 @@ jobs:
       # rustfmt.toml relies on nightly-only options (group_imports,
       # imports_granularity, ...) and `make fmt`/`make lint` format with
       # nightly rustfmt; stable rustfmt would silently check a different
-      # effective configuration.
+      # effective configuration. The pinned dtolnay action selects its
+      # toolchain by ref and ignores a `toolchain:` input, so nightly with
+      # rustfmt is installed explicitly via rustup.
       - uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
-        with:
-          toolchain: nightly
-          components: rustfmt
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: cargo +nightly fmt --all -- --check
 
   clippy:
