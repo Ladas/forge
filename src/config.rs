@@ -163,6 +163,13 @@ pub struct ClusterSpec {
     /// Node layout for this Kind cluster.
     #[serde(default)]
     pub nodes: NodeConfig,
+    /// Host-to-node port mappings (Kind `extraPortMappings`).
+    ///
+    /// Maps host ports to Kind node ports via `extraPortMappings` in the
+    /// Kind cluster config. Required on macOS where `MetalLB` `LoadBalancer`
+    /// IPs are unreachable from the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortMapping>,
     /// Stacks to apply to this cluster (must exist in `spec.stacks`).
     #[serde(default)]
     pub stacks: Vec<String>,
@@ -332,7 +339,10 @@ pub struct PortMapping {
     pub host: u16,
     /// Container port.
     pub container: u16,
-    /// Protocol (tcp or udp).
+    /// Port protocol.
+    ///
+    /// Cluster mappings accept `tcp`, `udp` or `sctp` (case-insensitive),
+    /// matching what KIND supports. Service ports accept `tcp` only.
     #[serde(default = "default_protocol")]
     pub protocol: String,
 }
